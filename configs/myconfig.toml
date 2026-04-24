@@ -1,0 +1,40 @@
+[system]
+# Load language from environment variable(It is set by the hook)
+language = "${env:DBGPT_LANG:-zh-cn}"
+api_keys = []
+encrypt_key = "your_secret_key"
+
+# Server Configurations
+[service.web]
+host = "0.0.0.0"
+port = 5670
+
+[service.web.database]
+type = "mysql"
+host = "167.88.43.199"
+port = "5577"
+user = "root"
+database = "dbgpt"
+password = "1!wt8aug4tf"
+
+[rag.storage]
+[rag.storage.vector]
+type = "chroma"
+persist_path = "pilot/data"
+
+# Model Configurations
+[models]
+[[models.llms]]
+#name = "deepseek-chat"
+#provider = "proxy/deepseek"
+#api_base = "https://api.deepseek.com"
+name = "MiniMax-M2.7"
+provider = "proxy/claude"
+api_base = "https://api.minimaxi.com/anthropic"
+api_key = "sk-cp-q4IFnMpCCxepxEesbnNdVyxxmWYtwJFaRqyNreg9upvGRe-qMTHVNtKIGXv8c9XC40K7ZeB4_-YSBgJE_jCTu7q37ntkI2q7HMsKogM1uBgnmLFKJfF-wyw"
+
+[[models.embeddings]]
+name = "text-embedding-ada-002"
+provider = "proxy/openai"
+api_url = "https://api.apimart.ai/v1/chat/completions"
+api_key = "sk-qQ43WuHFeGFeegm15Cz8CFSFjd9M6OnLMrcMWfOs7KFQToTr"
