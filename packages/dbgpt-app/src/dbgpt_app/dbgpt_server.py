@@ -1,7 +1,8 @@
 import logging
 import os
 import sys
-from typing import List
+from contextlib import nullcontext
+from typing import List, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +19,10 @@ from dbgpt.configs.model_config import (
 from dbgpt.util.fastapi import create_app, replace_router
 from dbgpt.util.i18n_utils import _, set_default_language
 from dbgpt.util.parameter_utils import _get_dict_from_obj
+from dbgpt.util.startup_profiler import (
+    StartupProfiler,
+    register_startup_success_handler,
+)
 from dbgpt.util.system_utils import get_system_info
 from dbgpt.util.tracer import SpanType, SpanTypeRunName, initialize_tracer, root_tracer
 from dbgpt.util.utils import (
@@ -50,6 +55,12 @@ app = create_app(
 replace_router(app)
 
 system_app = SystemApp(app)
+
+
+def _stage(startup_profiler: Optional[StartupProfiler], name: str):
+    if startup_profiler:
+        return startup_profiler.stage(name)
+    return nullcontext()
 
 
 def mount_routers(app: FastAPI):
@@ -134,7 +145,11 @@ def mount_static_files(app: FastAPI, param: ApplicationConfig):
 add_exception_handler(app)
 
 
-def initialize_app(param: ApplicationConfig, args: List[str] = None):
+def initialize_app(
+    param: ApplicationConfig,
+    args: List[str] = None,
+    startup_profiler: Optional[StartupProfiler] = None,
+):
     """Initialize app
     If you use gunicorn as a process manager, initialize_app can be invoke in
     `on_starting` hook.
@@ -148,129 +163,143 @@ def initialize_app(param: ApplicationConfig, args: List[str] = None):
 
     web_config = param.service.web
     log_config = web_config.log or param.log
-    setup_logging(
-        "dbgpt",
-        log_config,
-        default_logger_filename=os.path.join(LOGDIR, "dbgpt_webserver.log"),
-    )
+    with _stage(startup_profiler, "setup_logging"):
+        setup_logging(
+            "dbgpt",
+            log_config,
+            default_logger_filename=os.path.join(LOGDIR, "dbgpt_webserver.log"),
+        )
 
-    server_init(param, system_app)
-    mount_routers(app)
+    with _stage(startup_profiler, "server_init"):
+        server_init(param, system_app)
+    with _stage(startup_profiler, "mount_routers"):
+        mount_routers(app)
     model_start_listener = _create_model_start_listener(system_app)
-    initialize_components(
-        param,
-        system_app,
-    )
-    system_app.on_init()
+    with _stage(startup_profiler, "initialize_components"):
+        initialize_components(
+            param,
+            system_app,
+        )
+    with _stage(startup_profiler, "system_app_on_init"):
+        system_app.on_init()
 
     # Migration db storage, so you db models must be imported before this
-    _migration_db_storage(
-        param.service.web.database, web_config.disable_alembic_upgrade
-    )
+    with _stage(startup_profiler, "migration_db_storage"):
+        _migration_db_storage(
+            param.service.web.database, web_config.disable_alembic_upgrade
+        )
 
     # After init, when the database is ready
-    system_app.after_init()
+    with _stage(startup_profiler, "system_app_after_init"):
+        system_app.after_init()
 
     # Register default data sources
-    try:
-        from dbgpt.configs.model_config import PILOT_PATH, ROOT_PATH
-        from dbgpt_serve.datasource.manages.connect_config_db import ConnectConfigDao
+    with _stage(startup_profiler, "register_default_data_sources"):
+        try:
+            from dbgpt.configs.model_config import PILOT_PATH, ROOT_PATH
+            from dbgpt_serve.datasource.manages.connect_config_db import ConnectConfigDao
 
-        dao = ConnectConfigDao()
-        db_name = "Walmart_Sales"
-        if not dao.get_by_names(db_name):
-            candidate_paths = [
-                os.path.join(PILOT_PATH, "examples", "Walmart_Sales.db"),
-                os.path.join(
-                    ROOT_PATH, "docker", "examples", "dashboard", "Walmart_Sales.db"
-                ),
-            ]
-            db_absolute_path = next(
-                (p for p in candidate_paths if os.path.isfile(p)), None
-            )
-            if db_absolute_path is None:
-                logger.info(
-                    f"Skipping default data source '%s': file not found in any "
-                    f"{db_name} at {candidate_paths}"
+            dao = ConnectConfigDao()
+            db_name = "Walmart_Sales"
+            if not dao.get_by_names(db_name):
+                candidate_paths = [
+                    os.path.join(PILOT_PATH, "examples", "Walmart_Sales.db"),
+                    os.path.join(
+                        ROOT_PATH, "docker", "examples", "dashboard", "Walmart_Sales.db"
+                    ),
+                ]
+                db_absolute_path = next(
+                    (p for p in candidate_paths if os.path.isfile(p)), None
                 )
-            else:
-                dao.add_file_db(
-                    db_name=db_name,
-                    db_type="sqlite",
-                    db_path=db_absolute_path,
-                    comment="Default Walmart Sales example database",
-                )
-                logger.info(
-                    f"Successfully registered default data source: "
-                    f"{db_name} at {db_absolute_path}"
-                )
-    except Exception as e:
-        logger.error(f"Failed to register default data sources: {str(e)}")
+                if db_absolute_path is None:
+                    logger.info(
+                        f"Skipping default data source '%s': file not found in any "
+                        f"{db_name} at {candidate_paths}"
+                    )
+                else:
+                    dao.add_file_db(
+                        db_name=db_name,
+                        db_type="sqlite",
+                        db_path=db_absolute_path,
+                        comment="Default Walmart Sales example database",
+                    )
+                    logger.info(
+                        f"Successfully registered default data source: "
+                        f"{db_name} at {db_absolute_path}"
+                    )
+        except Exception as e:
+            logger.error(f"Failed to register default data sources: {str(e)}")
 
     binding_port = web_config.port
     binding_host = web_config.host
-    if not web_config.light:
-        from dbgpt.model.cluster.storage import ModelStorage
-        from dbgpt_serve.model.serve import Serve as ModelServe
+    with _stage(startup_profiler, "initialize_worker_manager"):
+        if not web_config.light:
+            from dbgpt.model.cluster.storage import ModelStorage
+            from dbgpt_serve.model.serve import Serve as ModelServe
 
-        logger.info(
-            "Model Unified Deployment Mode, run all services in the same process"
-        )
-        model_serve = ModelServe.get_instance(system_app)
-        # Persistent model storage
-        model_storage = ModelStorage(model_serve.model_storage)
-        initialize_worker_manager_in_client(
-            worker_params=param.service.model.worker,
-            models_config=param.models,
-            app=app,
-            binding_port=binding_port,
-            binding_host=binding_host,
-            start_listener=model_start_listener,
-            system_app=system_app,
-            model_storage=model_storage,
-        )
+            logger.info(
+                "Model Unified Deployment Mode, run all services in the same process"
+            )
+            model_serve = ModelServe.get_instance(system_app)
+            # Persistent model storage
+            model_storage = ModelStorage(model_serve.model_storage)
+            initialize_worker_manager_in_client(
+                worker_params=param.service.model.worker,
+                models_config=param.models,
+                app=app,
+                binding_port=binding_port,
+                binding_host=binding_host,
+                start_listener=model_start_listener,
+                system_app=system_app,
+                model_storage=model_storage,
+            )
 
-    else:
-        # MODEL_SERVER is controller address now
-        controller_addr = web_config.controller_addr
-        param.models.llms = []
-        param.models.rerankers = []
-        param.models.embeddings = []
-        initialize_worker_manager_in_client(
-            worker_params=param.service.model.worker,
-            models_config=param.models,
-            app=app,
-            run_locally=False,
-            controller_addr=controller_addr,
-            binding_port=binding_port,
-            binding_host=binding_host,
-            start_listener=model_start_listener,
-            system_app=system_app,
-        )
+        else:
+            # MODEL_SERVER is controller address now
+            controller_addr = web_config.controller_addr
+            param.models.llms = []
+            param.models.rerankers = []
+            param.models.embeddings = []
+            initialize_worker_manager_in_client(
+                worker_params=param.service.model.worker,
+                models_config=param.models,
+                app=app,
+                run_locally=False,
+                controller_addr=controller_addr,
+                binding_port=binding_port,
+                binding_host=binding_host,
+                start_listener=model_start_listener,
+                system_app=system_app,
+            )
 
-    mount_static_files(app, param)
+    with _stage(startup_profiler, "mount_static_files"):
+        mount_static_files(app, param)
 
     # Before start, after on_init
-    system_app.before_start()
+    with _stage(startup_profiler, "system_app_before_start"):
+        system_app.before_start()
     return param
 
 
-def run_uvicorn(param: ServiceWebParameters):
+def run_uvicorn(
+    param: ServiceWebParameters, startup_profiler: Optional[StartupProfiler] = None
+):
     import uvicorn
 
-    setup_http_service_logging()
+    with _stage(startup_profiler, "run_uvicorn_prepare"):
+        setup_http_service_logging()
 
-    # https://github.com/encode/starlette/issues/617
-    cors_app = CORSMiddleware(
-        app=app,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
-    )
-    log_level = "info"
-    if param.log:
-        log_level = logging_str_to_uvicorn_level(param.log.level)
+        # https://github.com/encode/starlette/issues/617
+        cors_app = CORSMiddleware(
+            app=app,
+            allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5670", "http://127.0.0.1:5670"],
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["*"],
+        )
+        log_level = "info"
+        if param.log:
+            log_level = logging_str_to_uvicorn_level(param.log.level)
     uvicorn.run(
         cors_app,
         host=param.host,
@@ -280,20 +309,23 @@ def run_uvicorn(param: ServiceWebParameters):
 
 
 def run_webserver(config_file: str):
+    startup_profiler = StartupProfiler("webserver")
     # Load configuration with specified config file
-    param = load_config(config_file)
+    with startup_profiler.stage("load_config"):
+        param = load_config(config_file, startup_profiler=startup_profiler)
     trace_config = param.service.web.trace or param.trace
     trace_file = trace_config.file or os.path.join(
         "logs", "dbgpt_webserver_tracer.jsonl"
     )
     config = system_app.config
     config.configs["app_config"] = param
-    initialize_tracer(
-        trace_file,
-        system_app=system_app,
-        root_operation_name=trace_config.root_operation_name or "DB-GPT-Webserver",
-        tracer_parameters=trace_config,
-    )
+    with startup_profiler.stage("initialize_tracer"):
+        initialize_tracer(
+            trace_file,
+            system_app=system_app,
+            root_operation_name=trace_config.root_operation_name or "DB-GPT-Webserver",
+            tracer_parameters=trace_config,
+        )
 
     with root_tracer.start_span(
         "run_webserver",
@@ -304,7 +336,8 @@ def run_webserver(config_file: str):
             "sys_infos": _get_dict_from_obj(get_system_info()),
         },
     ):
-        param = initialize_app(param)
+        with startup_profiler.stage("initialize_app"):
+            param = initialize_app(param, startup_profiler=startup_profiler)
 
         # TODO
         from dbgpt_serve.agent.agents.expand.app_start_assisant_agent import (  # noqa: F401
@@ -314,10 +347,18 @@ def run_webserver(config_file: str):
             IntentRecognitionAgent,
         )
 
-        run_uvicorn(param.service.web)
+        with startup_profiler.stage("register_startup_success_handler"):
+            register_startup_success_handler(
+                app=app,
+                profiler=startup_profiler,
+                host=param.service.web.host,
+                port=param.service.web.port,
+            )
+
+        run_uvicorn(param.service.web, startup_profiler=startup_profiler)
 
 
-def scan_configs():
+def scan_configs(startup_profiler: Optional[StartupProfiler] = None):
     from dbgpt.model import scan_model_providers
     from dbgpt_app.initialization.app_initialization import scan_app_configs
     from dbgpt_app.initialization.serve_initialization import scan_serve_configs
@@ -326,18 +367,26 @@ def scan_configs():
 
     cm = ConnectorManager(system_app)
     # pre import all connectors
-    cm.on_init()
+    with _stage(startup_profiler, "scan_connectors"):
+        cm.on_init()
     # Register all model providers
-    scan_model_providers()
+    with _stage(startup_profiler, "scan_model_providers"):
+        scan_model_providers()
     # Register all serve configs
-    scan_serve_configs()
+    with _stage(startup_profiler, "scan_serve_configs"):
+        scan_serve_configs()
     # Register all storage configs
-    scan_storage_configs()
+    with _stage(startup_profiler, "scan_storage_configs"):
+        scan_storage_configs()
     # Register all app configs
-    scan_app_configs()
+    with _stage(startup_profiler, "scan_app_configs"):
+        scan_app_configs()
 
 
-def load_config(config_file: str = None) -> ApplicationConfig:
+def load_config(
+    config_file: str = None,
+    startup_profiler: Optional[StartupProfiler] = None,
+) -> ApplicationConfig:
     from dbgpt._private.config import Config
     from dbgpt.configs.model_config import ROOT_PATH as DBGPT_ROOT_PATH
 
@@ -354,17 +403,21 @@ def load_config(config_file: str = None) -> ApplicationConfig:
     from dbgpt.util.configure import ConfigurationManager
 
     logger.info(f"Loading configuration from: {config_file}")
-    cfg = ConfigurationManager.from_file(config_file)
-    sys_config = cfg.parse_config(SystemParameters, prefix="system")
+    with _stage(startup_profiler, "load_configuration"):
+        cfg = ConfigurationManager.from_file(config_file)
+    with _stage(startup_profiler, "parse_system_config"):
+        sys_config = cfg.parse_config(SystemParameters, prefix="system")
     # Must set default language before any i18n usage
     set_default_language(sys_config.language)
     _CFG = Config()
     _CFG.LANGUAGE = sys_config.language
 
     # Scan all configs
-    scan_configs()
+    with _stage(startup_profiler, "scan_configs"):
+        scan_configs(startup_profiler=startup_profiler)
 
-    app_config = cfg.parse_config(ApplicationConfig, hook_section="hooks")
+    with _stage(startup_profiler, "parse_app_config"):
+        app_config = cfg.parse_config(ApplicationConfig, hook_section="hooks")
     return app_config
 
 

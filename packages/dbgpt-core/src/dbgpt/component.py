@@ -10,12 +10,19 @@ import atexit
 import logging
 import sys
 import threading
+import time
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Dict, Optional, Type, TypeVar, Union
 
 from dbgpt.util import AppConfig
 from dbgpt.util.annotations import PublicAPI
+from dbgpt.util.startup_profiler import (
+    StartupStage,
+    is_startup_timing_enabled,
+    write_startup_line,
+    write_startup_summary,
+)
 
 # Checking for type hints during runtime
 if TYPE_CHECKING:
@@ -302,14 +309,79 @@ class SystemApp(LifeCycle):
     def after_start(self):
         """Invoke the after_start hooks for all registered components."""
         copied_view = {k: v for k, v in self.components.items()}
-        for _, v in copied_view.items():
-            v.after_start()
+        detailed_timing = is_startup_timing_enabled()
+        component_stages: list[StartupStage] = []
+        for component_name, component in copied_view.items():
+            begin = time.perf_counter()
+            if detailed_timing:
+                write_startup_line(
+                    "system_app",
+                    f">>> after_start.component {component_name}",
+                )
+            try:
+                component.after_start()
+            finally:
+                elapsed = time.perf_counter() - begin
+                component_stages.append(
+                    StartupStage(name=component_name, elapsed=elapsed)
+                )
+                if detailed_timing:
+                    write_startup_line(
+                        "system_app",
+                        (
+                            f"<<< after_start.component {component_name} | "
+                            f"{elapsed:.3f}s"
+                        ),
+                    )
+        if detailed_timing and component_stages:
+            write_startup_summary(
+                "system_app",
+                component_stages,
+                title="after_start component summary",
+            )
 
     async def async_after_start(self):
         """Asynchronously invoke the after_start hooks for all registered components."""
         copied_view = {k: v for k, v in self.components.items()}
-        tasks = [v.async_after_start() for _, v in copied_view.items()]
-        await asyncio.gather(*tasks)
+        detailed_timing = is_startup_timing_enabled()
+        component_stages: list[StartupStage] = []
+
+        async def _timed_component_after_start(component_name: str, component):
+            begin = time.perf_counter()
+            if detailed_timing:
+                write_startup_line(
+                    "system_app",
+                    f">>> async_after_start.component {component_name}",
+                )
+            try:
+                await component.async_after_start()
+            finally:
+                elapsed = time.perf_counter() - begin
+                component_stages.append(
+                    StartupStage(name=component_name, elapsed=elapsed)
+                )
+                if detailed_timing:
+                    write_startup_line(
+                        "system_app",
+                        (
+                            f"<<< async_after_start.component {component_name} | "
+                            f"{elapsed:.3f}s"
+                        ),
+                    )
+
+        tasks = [
+            _timed_component_after_start(component_name, component)
+            for component_name, component in copied_view.items()
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            if detailed_timing and component_stages:
+                write_startup_summary(
+                    "system_app",
+                    component_stages,
+                    title="async_after_start component summary",
+                )
 
     def before_stop(self):
         """Invoke the before_stop hooks for all registered components."""
@@ -339,16 +411,52 @@ class SystemApp(LifeCycle):
 
         async def startup_event():
             """ASGI app startup event handler."""
+            detailed_timing = is_startup_timing_enabled()
+            startup_begin = time.perf_counter()
+            if detailed_timing:
+                write_startup_line("system_app", ">>> startup_event")
 
             async def _startup_func():
+                async_after_start_begin = time.perf_counter()
+                if detailed_timing:
+                    write_startup_line("system_app", ">>> async_after_start(background)")
                 try:
                     await self.async_after_start()
                 except Exception as e:
                     logger.error(f"Error starting system app: {e}")
                     sys.exit(1)
+                finally:
+                    if detailed_timing:
+                        async_elapsed = time.perf_counter() - async_after_start_begin
+                        write_startup_line(
+                            "system_app",
+                            (
+                                "<<< async_after_start(background) | "
+                                f"{async_elapsed:.3f}s"
+                            ),
+                        )
 
+            if detailed_timing:
+                write_startup_line(
+                    "system_app", "schedule async_after_start background task"
+                )
             asyncio.create_task(_startup_func())
-            self.after_start()
+            after_start_begin = time.perf_counter()
+            if detailed_timing:
+                write_startup_line("system_app", ">>> after_start(blocking)")
+            try:
+                self.after_start()
+            finally:
+                if detailed_timing:
+                    after_start_elapsed = time.perf_counter() - after_start_begin
+                    write_startup_line(
+                        "system_app",
+                        f"<<< after_start(blocking) | {after_start_elapsed:.3f}s",
+                    )
+                    startup_elapsed = time.perf_counter() - startup_begin
+                    write_startup_line(
+                        "system_app", f"<<< startup_event | {startup_elapsed:.3f}s"
+                    )
 
         async def shutdown_event():
             """ASGI app shutdown event handler."""

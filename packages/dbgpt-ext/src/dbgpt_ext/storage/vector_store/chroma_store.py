@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 
@@ -137,11 +138,13 @@ class ChromaStore(VectorStoreBase):
             self._chroma_client = PersistentClient(
                 path=self.persist_dir, settings=chroma_settings
             )
-        collection_metadata = collection_metadata or {"hnsw:space": "cosine"}
+        self._collection_lock = threading.Lock()
+        # Store metadata so recreated collections keep the same distance metric
+        self._collection_metadata = collection_metadata or {"hnsw:space": "cosine"}
 
         self._collection = self.create_collection(
             collection_name=self._collection_name,
-            collection_metadata=collection_metadata,
+            collection_metadata=self._collection_metadata,
         )
 
     def get_config(self) -> ChromaVectorConfig:
@@ -149,11 +152,51 @@ class ChromaStore(VectorStoreBase):
         return self._vector_store_config
 
     def create_collection(self, collection_name: str, **kwargs) -> Any:
-        return self._chroma_client.get_or_create_collection(
+        desired_metadata = kwargs.get("collection_metadata") or {"hnsw:space": "cosine"}
+        desired_space = desired_metadata.get("hnsw:space", "cosine")
+
+        collection = self._chroma_client.get_or_create_collection(
             name=collection_name,
             embedding_function=None,
-            metadata=kwargs.get("collection_metadata"),
+            metadata=desired_metadata,
         )
+
+        # ChromaDB IGNORES metadata on get_or_create_collection if collection already exists.
+        # Check the actual distance metric; if wrong, delete and recreate with the correct one.
+        actual_space = (collection.metadata or {}).get("hnsw:space", "l2")
+        if actual_space != desired_space:
+            logger.warning(
+                f"[ChromaStore] Collection '{collection_name}' has hnsw:space='{actual_space}' "
+                f"but desired space is '{desired_space}'. Deleting stale collection and "
+                f"recreating with correct metric …"
+            )
+            self._chroma_client.delete_collection(collection_name)
+            collection = self._chroma_client.create_collection(
+                name=collection_name,
+                embedding_function=None,
+                metadata=desired_metadata,
+            )
+            logger.info(
+                f"[ChromaStore] Recreated collection '{collection_name}' with "
+                f"hnsw:space='{desired_space}'. Old data was dropped; please re-vectorize."
+            )
+
+        return collection
+
+    def _get_collection_safe(self, recreate: bool = False):
+        """Get collection safely and recreate when needed.
+
+        Args:
+            recreate: Force re-acquire collection from client.
+        """
+        with self._collection_lock:
+            if self._collection is None or recreate:
+                # Always pass collection_metadata to preserve hnsw:space=cosine
+                self._collection = self.create_collection(
+                    self._collection_name,
+                    collection_metadata=self._collection_metadata,
+                )
+            return self._collection
 
     def similar_search(
         self, text, topk, filters: Optional[MetadataFilters] = None
@@ -165,7 +208,7 @@ class ChromaStore(VectorStoreBase):
             topk=topk,
             filters=filters,
         )
-        return [
+        chunks = [
             Chunk(
                 content=chroma_result[0],
                 metadata=chroma_result[1] or {},
@@ -178,6 +221,8 @@ class ChromaStore(VectorStoreBase):
                 chroma_results["ids"][0],
             )
         ]
+        self._log_vector_search_result(query_text=text, chunks=chunks, topk=topk)
+        return chunks
 
     def similar_search_with_scores(
         self, text, topk, score_threshold, filters: Optional[MetadataFilters] = None
@@ -194,12 +239,18 @@ class ChromaStore(VectorStoreBase):
                 dissimilar, 1 is most similar.
             filters(MetadataFilters): metadata filters, defaults to None
         """
-        logger.info("ChromaStore similar search with scores")
+        logger.info(f"ChromaStore similar search with scores | query='{text}' | topk={topk} | score_threshold={score_threshold}")
         chroma_results = self._query(
             text=text,
             topk=topk,
             filters=filters,
         )
+        
+        # LOG RAW CHROMA RESULTS
+        distances = chroma_results.get("distances", [[]])[0]
+        ids = chroma_results.get("ids", [[]])[0]
+        logger.info(f"Chroma raw retrieved chunks count: {len(ids)} | distances: {distances} | ids: {ids}")
+
         chunks = [
             (
                 Chunk(
@@ -216,7 +267,21 @@ class ChromaStore(VectorStoreBase):
                 chroma_results["ids"][0],
             )
         ]
-        return self.filter_by_score_threshold(chunks, score_threshold)
+        
+        # LOG COMPUTED SCORES
+        scores_log = [(c.chunk_id, c.score) for c in chunks]
+        logger.info(f"Chroma calculated scores (1 - distance) before threshold {score_threshold}: {scores_log}")
+
+        filtered_chunks = self.filter_by_score_threshold(chunks, score_threshold)
+        logger.info(f"Chroma final filtered chunks count: {len(filtered_chunks)}")
+        
+        self._log_vector_search_result(
+            query_text=text,
+            chunks=filtered_chunks,
+            topk=topk,
+            score_threshold=score_threshold,
+        )
+        return filtered_chunks
 
     async def afull_text_search(
         self, text: str, topk: int, filters: Optional[MetadataFilters] = None
@@ -284,22 +349,32 @@ class ChromaStore(VectorStoreBase):
         logger.info(f"chroma vector_name:{vector_name} begin delete...")
 
         try:
-            # Check if collection exists first
-            collections = self._chroma_client.list_collections()
-            collection_exists = self._collection.name in collections
-
-            if not collection_exists:
-                logger.warning(
-                    f"Collection {self._collection.name} does not exist, skip delete"
-                )
-                return True
-
-            # Delete collection if it exists
-            self._chroma_client.delete_collection(self._collection.name)
+            # Delete by name directly to avoid list_collections scanning all
+            # collections and failing on unrelated legacy-broken records.
+            target_collection_name = vector_name or self._collection_name
+            self._chroma_client.delete_collection(target_collection_name)
+            # The current in-memory collection handle becomes invalid after delete.
+            # Reset it and lazily recreate on next read/write path.
+            with self._collection_lock:
+                if target_collection_name == self._collection_name:
+                    self._collection = None
             SharedSystemClient.clear_system_cache()
+            logger.info(f"Deleted collection {target_collection_name} successfully")
             return True
 
         except Exception as e:
+            err_msg = str(e)
+            # Chroma raises ValueError/InvalidCollectionException when collection is
+            # already absent. Treat it as idempotent success for refresh flows.
+            if "does not exist" in err_msg:
+                logger.warning(
+                    f"Collection {vector_name} does not exist, skip delete"
+                )
+                with self._collection_lock:
+                    if (vector_name or self._collection_name) == self._collection_name:
+                        self._collection = None
+                SharedSystemClient.clear_system_cache()
+                return True
             logger.error(f"Error during vector store deletion: {e}")
             raise
 
@@ -319,22 +394,26 @@ class ChromaStore(VectorStoreBase):
             batch_ids = id_list[i : i + batch_size]
             logger.info(f"Deleting batch {i // batch_size + 1}: {len(batch_ids)} IDs")
             try:
-                self._collection.delete(ids=batch_ids)
+                self._get_collection_safe().delete(ids=batch_ids)
             except Exception as e:
                 logger.error(f"Failed to delete batch starting at index {i}: {e}")
 
     def truncate(self) -> List[str]:
-        """Truncate data index_name."""
-        logger.info(f"begin truncate chroma collection:{self._collection.name}")
-        results = self._collection.get()
-        ids = results.get("ids")
-        if ids:
-            self._collection.delete(ids=ids)
-            logger.info(
-                f"truncate chroma collection {self._collection.name} "
-                f"{len(ids)} chunks success"
-            )
-            return ids
+        """Truncate data index_name via full collection deletion."""
+        collection_name = self._collection_name
+        logger.info(f"truncating chroma collection via deletion: {collection_name}")
+        
+        # Get count for logging before deletion
+        collection = self._get_collection_safe()
+        count = collection.count()
+        
+        # Delete the entire collection
+        self.delete_vector_name(collection_name)
+        
+        # Immediately re-initialize to ensure it's ready for ingestion
+        self._get_collection_safe(recreate=True)
+        
+        logger.info(f"truncate chroma collection {collection_name} ({count} records) success")
         return []
 
     def convert_metadata_filters(
@@ -392,22 +471,52 @@ class ChromaStore(VectorStoreBase):
         texts = list(texts)
         if self.embeddings is not None:
             embeddings = self.embeddings.embed_documents(texts)
-        if metadatas:
-            try:
-                self._collection.upsert(
+        collection = self._get_collection_safe()
+
+        def _do_upsert(target_collection):
+            if metadatas:
+                target_collection.upsert(
                     metadatas=metadatas,
                     embeddings=embeddings,  # type: ignore
                     documents=texts,
                     ids=ids,
                 )
-            except ValueError as e:
-                logger.error(f"Error upsert chromadb with metadata: {e}")
+            else:
+                target_collection.upsert(
+                    embeddings=embeddings,  # type: ignore
+                    documents=texts,
+                    ids=ids,
+                )
+
+        if metadatas:
+            try:
+                _do_upsert(collection)
+            except Exception as e:
+                err_msg = str(e)
+                if "does not exist" in err_msg:
+                    logger.warning(
+                        "Collection %s is stale, recreating and retrying upsert once.",
+                        self._collection_name,
+                    )
+                    collection = self._get_collection_safe(recreate=True)
+                    _do_upsert(collection)
+                else:
+                    logger.error(f"Error upsert chromadb with metadata: {e}")
+                    raise
         else:
-            self._collection.upsert(
-                embeddings=embeddings,  # type: ignore
-                documents=texts,
-                ids=ids,
-            )
+            try:
+                _do_upsert(collection)
+            except Exception as e:
+                err_msg = str(e)
+                if "does not exist" in err_msg:
+                    logger.warning(
+                        "Collection %s is stale, recreating and retrying upsert once.",
+                        self._collection_name,
+                    )
+                    collection = self._get_collection_safe(recreate=True)
+                    _do_upsert(collection)
+                else:
+                    raise
         return ids
 
     def _query(self, text: str, topk: int, filters: Optional[MetadataFilters] = None):
@@ -426,11 +535,24 @@ class ChromaStore(VectorStoreBase):
         if self.embeddings is None:
             raise ValueError("Chroma Embeddings is None")
         query_embedding = self.embeddings.embed_query(text)
-        return self._collection.query(
+        self._log_vector_search_request(
+            query_text=text,
+            query_vector=query_embedding,
+            topk=topk,
+            filters=filters,
+        )
+        collection = self._get_collection_safe()
+        actual_count = collection.count()
+        # Chroma known issue: query() returns empty if n_results > actual HNSW density.
+        # Clamp n_results to actual_count to avoid this.
+        safe_n_results = min(topk, actual_count) if actual_count > 0 else 1
+        
+        result = collection.query(
             query_embeddings=query_embedding,
-            n_results=topk,
+            n_results=safe_n_results,
             where=where_filters,
         )
+        return result
 
     def _clean_persist_folder(self):
         """Clean persist folder."""

@@ -53,6 +53,29 @@ CFG = Config()
 C = TypeVar("C", bound="GPTsAppCommonConfig")
 
 
+def _resolve_final_stream_text(
+    *,
+    previous_text: str,
+    final_text: str,
+    incremental: bool,
+    text_output: bool,
+) -> str:
+    """Resolve the final stream payload for the current scene.
+
+    In text-output mode, preserve the historical behavior of slicing by the
+    already streamed prefix. In ModelOutput mode, SQL/tool execution may produce a
+    final view payload that is not a prefix-continuation of the model stream. In
+    that case we must send the full final payload instead of an empty delta.
+    """
+    if not incremental:
+        return final_text
+    if text_output:
+        return final_text[len(previous_text) :]
+    if final_text.startswith(previous_text):
+        return final_text[len(previous_text) :]
+    return final_text
+
+
 @dataclass
 class ChatParam:
     chat_session_id: str
@@ -486,10 +509,13 @@ class BaseChat(ABC):
             ai_response_text, view_message = await self._handle_final_output(
                 final_output, incremental=incremental
             )
-            full_text = view_message if text_output else final_output.text
-            # Return the incremental text
-            delta_text = full_text[len(previous_text) :]
-            result_text = delta_text if incremental else full_text
+            full_text = view_message if text_output else view_message
+            result_text = _resolve_final_stream_text(
+                previous_text=previous_text,
+                final_text=full_text,
+                incremental=incremental,
+                text_output=text_output,
+            )
             if text_output:
                 yield result_text
             else:

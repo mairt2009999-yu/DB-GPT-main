@@ -5,7 +5,7 @@ import math
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from dbgpt.core import Chunk, Embeddings
 from dbgpt.core.awel.flow import Parameter
@@ -159,6 +159,99 @@ class VectorStoreBase(IndexStoreBase, ABC):
                     f" threshold {score_threshold}"
                 )
         return candidates_chunks
+
+    def _safe_log_query_text(self, query_text: str, limit: int = 200) -> str:
+        """Return a compact query text for logging."""
+        query_text = query_text.replace("\n", "\\n")
+        if len(query_text) <= limit:
+            return query_text
+        return f"{query_text[:limit]}...(truncated)"
+
+    def _build_vector_preview(
+        self, vector: Optional[List[float]], preview_size: int = 8
+    ) -> Dict[str, Any]:
+        """Build vector preview data for logs."""
+        if vector is None:
+            return {"dim": 0, "preview": []}
+        try:
+            vector_len = len(vector)
+        except TypeError:
+            return {"dim": 0, "preview": []}
+        if vector_len == 0:
+            return {"dim": 0, "preview": []}
+
+        vector_preview = []
+        for item in vector[:preview_size]:
+            try:
+                vector_preview.append(round(float(item), 6))
+            except (TypeError, ValueError):
+                vector_preview.append(item)
+        return {"dim": vector_len, "preview": vector_preview}
+
+    def _build_chunk_previews(
+        self, chunks: List[Chunk], preview_size: int = 3, content_limit: int = 120
+    ) -> List[Dict[str, Any]]:
+        """Build compact chunk previews for logs."""
+        previews = []
+        for chunk in chunks[:preview_size]:
+            content = chunk.content or ""
+            content_preview = (
+                content[:content_limit] + "...(truncated)"
+                if len(content) > content_limit
+                else content
+            )
+            previews.append(
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "score": chunk.score,
+                    "retriever": chunk.retriever,
+                    "content_preview": content_preview.replace("\n", "\\n"),
+                }
+            )
+        return previews
+
+    def _log_vector_search_request(
+        self,
+        *,
+        query_text: str,
+        query_vector: Optional[List[float]],
+        topk: int,
+        score_threshold: Optional[float] = None,
+        filters: Optional[MetadataFilters] = None,
+    ) -> None:
+        """Log vector search request."""
+        vector_preview = self._build_vector_preview(query_vector)
+        logger.info(
+            "Vector search request | query=%s | topk=%s | score_threshold=%s | "
+            "vector_dim=%s | vector_preview=%s | filters=%s",
+            self._safe_log_query_text(query_text),
+            topk,
+            score_threshold,
+            vector_preview["dim"],
+            vector_preview["preview"],
+            filters,
+        )
+
+    def _log_vector_search_result(
+        self,
+        *,
+        query_text: str,
+        chunks: List[Chunk],
+        topk: int,
+        score_threshold: Optional[float] = None,
+    ) -> None:
+        """Log vector search result."""
+        top_scores = [chunk.score for chunk in chunks[:3]]
+        logger.info(
+            "Vector search result | query=%s | hit_count=%s | topk=%s | "
+            "score_threshold=%s | top_scores=%s | chunk_previews=%s",
+            self._safe_log_query_text(query_text),
+            len(chunks),
+            topk,
+            score_threshold,
+            top_scores,
+            self._build_chunk_previews(chunks),
+        )
 
     @abstractmethod
     def vector_name_exists(self) -> bool:

@@ -344,12 +344,24 @@ class ConnectorManager(BaseComponent):
             db_info.comment,
         )
 
-    async def async_db_summary_embedding(self, db_name, db_type):
+    async def async_db_summary_embedding(
+        self,
+        db_name,
+        db_type,
+        trigger: str = "serve.datasource.async_db_summary",
+        force_refresh: bool = False,
+    ):
         """Async db summary embedding."""
         executor = self.system_app.get_component(
             ComponentType.EXECUTOR_DEFAULT, ExecutorFactory
         ).create()  # type: ignore
-        executor.submit(self.db_summary_client.db_summary_embedding, db_name, db_type)
+        executor.submit(
+            self.db_summary_client.db_summary_embedding,
+            db_name,
+            db_type,
+            trigger,
+            force_refresh,
+        )
         return True
 
     @Deprecated(
@@ -394,6 +406,8 @@ class ConnectorManager(BaseComponent):
                 self.db_summary_client.db_summary_embedding,
                 db_info.db_name,
                 db_info.db_type,
+                "serve.datasource.add_db",
+                False,
             )
         except Exception as e:
             raise ValueError("Add db connect info error!" + str(e))

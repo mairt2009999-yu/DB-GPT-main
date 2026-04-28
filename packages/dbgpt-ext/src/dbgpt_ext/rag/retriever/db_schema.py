@@ -192,7 +192,7 @@ class DBSchemaRetriever(BaseRetriever):
         metadata["part"] = "field"
         filters = [MetadataFilter(key=k, value=v) for k, v in metadata.items()]
         field_chunks = self._field_vector_store_connector.similar_search_with_scores(
-            query, self._top_k, 0, MetadataFilters(filters=filters)
+            query, self._top_k, -1, MetadataFilters(filters=filters)
         )
         field_contents = [chunk.content.strip() for chunk in field_chunks]
         table_chunk.content += (
@@ -204,9 +204,11 @@ class DBSchemaRetriever(BaseRetriever):
         self, query, filters: Optional[MetadataFilters] = None
     ) -> List[Chunk]:
         """Similar search."""
+        logger.info(f"DBSchemaRetriever._similarity_search | query='{query}' | top_k={self._top_k} | filters={filters}")
         table_chunks = self._table_vector_store_connector.similar_search_with_scores(
-            query, self._top_k, 0, filters
+            query, self._top_k, -1, filters
         )
+        logger.info(f"DBSchemaRetriever._similarity_search | returned {len(table_chunks)} table_chunks.")
 
         # Find all table chunks which are not separated
         not_sep_chunks = [

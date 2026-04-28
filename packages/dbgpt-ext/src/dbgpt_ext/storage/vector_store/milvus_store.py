@@ -501,14 +501,15 @@ class MilvusStore(VectorStoreBase):
         # convert to milvus expr filter.
         milvus_filter_expr = self.convert_metadata_filters(filters) if filters else None
         _, docs_and_scores = self._search(text, topk, expr=milvus_filter_expr)
-
-        return [
+        chunks = [
             Chunk(
                 metadata=json.loads(doc.metadata.get("metadata", "")),
                 content=doc.content,
             )
             for doc, _, _ in docs_and_scores
         ]
+        self._log_vector_search_result(query_text=text, chunks=chunks, topk=topk)
+        return chunks
 
     def similar_search_with_scores(
         self,
@@ -558,23 +559,31 @@ class MilvusStore(VectorStoreBase):
                 f"similarity score need between 0 and 1, got {docs_and_scores}"
             )
 
+        chunks_with_scores = [
+            Chunk(
+                metadata=doc.metadata,
+                content=doc.content,
+                score=score,
+                chunk_id=str(id),
+            )
+            for doc, score, id in docs_and_scores
+        ]
         if score_threshold is not None:
-            docs_and_scores = [
-                Chunk(
-                    metadata=doc.metadata,
-                    content=doc.content,
-                    score=score,
-                    chunk_id=str(id),
-                )
-                for doc, score, id in docs_and_scores
-                if score >= score_threshold
+            chunks_with_scores = [
+                chunk for chunk in chunks_with_scores if chunk.score >= score_threshold
             ]
-            if len(docs_and_scores) == 0:
+            if len(chunks_with_scores) == 0:
                 logger.warning(
                     "No relevant docs were retrieved using the relevance score"
                     f" threshold {score_threshold}"
                 )
-        return docs_and_scores
+        self._log_vector_search_result(
+            query_text=text,
+            chunks=chunks_with_scores,
+            topk=topk,
+            score_threshold=score_threshold,
+        )
+        return chunks_with_scores
 
     def _search(
         self,
@@ -610,6 +619,12 @@ class MilvusStore(VectorStoreBase):
                     break
         #  query text embedding.
         query_vector = self.embedding.embed_query(query)
+        self._log_vector_search_request(
+            query_text=query,
+            query_vector=query_vector,
+            topk=k,
+            filters=None,
+        )
         # Determine result metadata fields.
         output_fields = self.fields[:]
         output_fields.remove(self.vector_field)

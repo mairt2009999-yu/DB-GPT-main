@@ -92,6 +92,10 @@ class RetrieverResource(Resource[ResourceParameters]):
         """Get the prompt for the resource."""
         if not question:
             raise ValueError("Question is required for knowledge resource.")
+        print(
+            f"[RetrieverResource] 🔔 get_prompt 被调用 | "
+            f"resource_name={self.name} | question={question[:80]}"
+        )
         chunks = await self.retrieve(question)
         if self.need_rerank and len(chunks) > 1:
             chunks = self.reranker.rank(candidates_with_scores=chunks, query=question)
@@ -182,4 +186,12 @@ class RetrieverResource(Resource[ResourceParameters]):
         Returns:
             List[Chunk]: list of chunks
         """
-        return await self.retriever.aretrieve_with_scores(query, score, filters)
+        print(
+            f"[RetrieverResource] 🔍 retrieve 开始执行向量检索 | "
+            f"query={query[:80]} | score_threshold={score}"
+        )
+        results = await self.retriever.aretrieve_with_scores(query, score, filters)
+        print(
+            f"[RetrieverResource] ✅ retrieve 完成 | 命中 {len(results)} 条 chunks"
+        )
+        return results

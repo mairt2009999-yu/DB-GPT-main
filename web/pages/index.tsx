@@ -525,6 +525,8 @@ const Playground: NextPage = () => {
 
   // Contexts
   const [selectedDb, setSelectedDb] = useState<DataSource | null>(null);
+  // 'react' = ReAct Agent (全量DDL), 'vector' = chat_with_db_execute (向量召回)
+  const [queryMode, setQueryMode] = useState<'react' | 'vector'>('react');
   const [selectedKnowledge, setSelectedKnowledge] = useState<KnowledgeSpace | null>(null);
   const [uploadedFile, setUploadedFile] = useState<any | null>(null);
 
@@ -1390,6 +1392,107 @@ const Playground: NextPage = () => {
     return deduped;
   };
 
+  /**
+   * 向量召回模式：调用 /api/v1/chat/completions + chat_with_db_execute
+   * 仅召回与问题相关的表 DDL，Token 消耗低，适合表多但问题聚焦的场景。
+   */
+  const handleVectorStart = async (inputQuery: string, effectiveDb: DataSource | null) => {
+    if (!inputQuery.trim() || loading) return;
+    if (!effectiveDb) {
+      message.warning('向量召回模式需要先选择数据库（点击工具栏数据库图标）');
+      return;
+    }
+
+    const currentConvId = conversationId || generateUUID();
+    if (!conversationId) setConversationId(currentConvId);
+    const currentOrder = Math.floor(messages.length / 2) + 1;
+    const responseId = generateUUID();
+    const humanId = generateUUID();
+
+    setMessages(prev => [
+      ...prev,
+      {
+        id: humanId,
+        role: 'human' as const,
+        context: inputQuery,
+        order: currentOrder,
+        attachedDb: { db_name: effectiveDb.db_name, db_type: effectiveDb.db_type },
+      },
+      { id: responseId, role: 'view' as const, context: '', order: currentOrder, thinking: true },
+    ]);
+
+    setLoading(true);
+    setQuery('');
+    setActiveViewMsgId(responseId);
+
+    try {
+      const response = await fetch(`${process.env.API_BASE_URL ?? ''}/api/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conv_uid: currentConvId,
+          chat_mode: 'chat_with_db_execute',
+          model_name: model,
+          user_input: inputQuery,
+          select_param: effectiveDb.db_name,
+          temperature: 0.6,
+          max_new_tokens: 4000,
+          incremental: true,
+        }),
+      });
+
+      if (!response.body) throw new Error('No response body');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let fullText = '';
+
+      const processVectorChunk = (raw: string) => {
+        if (!raw.startsWith('data:')) return;
+        const data = raw.slice(5).trim();
+        if (!data || data === '[DONE]') return;
+        try {
+          const payload = JSON.parse(data);
+          const delta = payload?.choices?.[0]?.delta?.content ?? '';
+          if (delta) {
+            fullText += delta;
+            setMessages(prev =>
+              prev.map(msg => (msg.id === responseId ? { ...msg, context: fullText, thinking: false } : msg)),
+            );
+          }
+        } catch {
+          /* ignore parse errors */
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+        parts.forEach(processVectorChunk);
+      }
+
+      // Finalize — clear thinking flag
+      setMessages(prev => prev.map(msg => (msg.id === responseId ? { ...msg, thinking: false } : msg)));
+      setLoading(false);
+    } catch (err: any) {
+      setLoading(false);
+      message.error(err?.message || '向量召回请求失败');
+      setMessages(prev => {
+        const newMsgs = [...prev];
+        const lastMsg = newMsgs[newMsgs.length - 1];
+        if (lastMsg?.role === 'view') {
+          lastMsg.context = err?.message || '请求失败，请重试';
+          lastMsg.thinking = false;
+        }
+        return newMsgs;
+      });
+    }
+  };
+
   const handleStart = async (
     inputQuery = query,
     overrideFile?: File | null,
@@ -1399,6 +1502,13 @@ const Playground: NextPage = () => {
     const effectiveFile = overrideFile !== undefined ? overrideFile : uploadedFile;
     const effectiveSkill = overrideSkill !== undefined ? overrideSkill : selectedSkill;
     const effectiveDb = overrideDb !== undefined ? overrideDb : selectedDb;
+
+    // 向量召回模式走独立函数
+    if (queryMode === 'vector') {
+      await handleVectorStart(inputQuery, effectiveDb);
+      return;
+    }
+
     if ((!inputQuery.trim() && !effectiveFile) || loading) return;
 
     let finalQuery = inputQuery;
@@ -2660,6 +2770,29 @@ const Playground: NextPage = () => {
                             <div className='model-selector-premium'>
                               <ModelSelector onChange={val => setModel(val)} />
                             </div>
+
+                            {/* Separator */}
+                            <div className='w-px h-4 bg-gray-200 dark:bg-gray-700 mx-0.5' />
+
+                            {/* Query Mode Toggle: ReAct Agent vs. 向量召回 */}
+                            <Tooltip
+                              title={
+                                queryMode === 'react'
+                                  ? 'ReAct Agent：全量读取所有表结构，点击切换为向量召回模式'
+                                  : '向量召回：仅匹配相关表，Token消耗低，点击切换回ReAct Agent'
+                              }
+                            >
+                              <button
+                                onClick={() => setQueryMode(prev => (prev === 'react' ? 'vector' : 'react'))}
+                                className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all duration-200 border ${
+                                  queryMode === 'vector'
+                                    ? 'bg-blue-50 text-blue-600 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700'
+                                    : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-gray-300 dark:bg-gray-800/50 dark:text-gray-400 dark:border-gray-700'
+                                }`}
+                              >
+                                {queryMode === 'vector' ? '🔍 向量召回' : '⚡ ReAct'}
+                              </button>
+                            </Tooltip>
                             <style
                               dangerouslySetInnerHTML={{
                                 __html: `
@@ -3339,6 +3472,29 @@ const Playground: NextPage = () => {
                           <div className='model-selector-premium'>
                             <ModelSelector onChange={val => setModel(val)} />
                           </div>
+
+                          {/* Separator */}
+                          <div className='w-px h-4 bg-gray-200 dark:bg-gray-700 mx-0.5' />
+
+                          {/* Query Mode Toggle: ReAct Agent vs. 向量召回 */}
+                          <Tooltip
+                            title={
+                              queryMode === 'react'
+                                ? 'ReAct Agent：全量读取所有表结构，点击切换为向量召回模式'
+                                : '向量召回：仅匹配相关表，Token消耗低，点击切换回ReAct Agent'
+                            }
+                          >
+                            <button
+                              onClick={() => setQueryMode(prev => (prev === 'react' ? 'vector' : 'react'))}
+                              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all duration-200 border ${
+                                queryMode === 'vector'
+                                  ? 'bg-blue-50 text-blue-600 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700'
+                                  : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-gray-300 dark:bg-gray-800/50 dark:text-gray-400 dark:border-gray-700'
+                              }`}
+                            >
+                              {queryMode === 'vector' ? '🔍 向量召回' : '⚡ ReAct'}
+                            </button>
+                          </Tooltip>
                           <style
                             dangerouslySetInnerHTML={{
                               __html: `

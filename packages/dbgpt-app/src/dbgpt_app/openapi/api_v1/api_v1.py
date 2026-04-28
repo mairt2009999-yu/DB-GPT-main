@@ -223,14 +223,27 @@ async def db_connect_delete(db_name: str = None):
 async def db_connect_refresh(db_config: DBConfig = Body()):
     CFG.local_db_manager.db_summary_client.delete_db_profile(db_config.db_name)
     success = await CFG.local_db_manager.async_db_summary_embedding(
-        db_config.db_name, db_config.db_type
+        db_config.db_name,
+        db_config.db_type,
+        trigger="app.openapi.v1.chat.db.refresh",
+        force_refresh=True,
     )
     return Result.succ(success)
 
 
-async def async_db_summary_embedding(db_name, db_type):
+async def async_db_summary_embedding(
+    db_name: str,
+    db_type: str,
+    trigger: str = "app.openapi.v1.chat.db.summary",
+    force_refresh: bool = False,
+):
     db_summary_client = DBSummaryClient(system_app=CFG.SYSTEM_APP)
-    db_summary_client.db_summary_embedding(db_name, db_type)
+    db_summary_client.db_summary_embedding(
+        db_name,
+        db_type,
+        trigger=trigger,
+        force_refresh=force_refresh,
+    )
 
 
 @router.post("/v1/chat/db/test/connect", response_model=Result[bool])
@@ -249,7 +262,11 @@ async def test_connect(
 @router.post("/v1/chat/db/summary", response_model=Result[bool])
 async def db_summary(db_name: str, db_type: str):
     # TODO Change the synchronous call to the asynchronous call
-    async_db_summary_embedding(db_name, db_type)
+    await async_db_summary_embedding(
+        db_name,
+        db_type,
+        trigger="app.openapi.v1.chat.db.summary",
+    )
     return Result.succ(True)
 
 
@@ -615,6 +632,7 @@ async def chat_completions(
                         chat,
                         dialogue.incremental,
                         dialogue.model_name,
+                        text_output=False,
                         openai_format=dialogue.incremental,
                     ),
                     headers=headers,
@@ -764,15 +782,20 @@ async def stream_generator(
     try:
         if incremental and not openai_format:
             raise ValueError("Incremental response must be openai-compatible format.")
+        stream_text_output = False if openai_format else text_output
         async for chunk in chat.stream_call(
-            text_output=text_output, incremental=incremental
+            text_output=stream_text_output, incremental=incremental
         ):
             if not chunk:
                 await asyncio.sleep(0.02)
                 continue
 
             if openai_format:
-                # Must be ModelOutput
+                if isinstance(chunk, str):
+                    raise TypeError(
+                        "OpenAI format stream expected ModelOutput chunks, got str. "
+                        "Check chat.stream_call(text_output=False)."
+                    )
                 output: ModelOutput = cast(ModelOutput, chunk)
                 text = None
                 think_text = None

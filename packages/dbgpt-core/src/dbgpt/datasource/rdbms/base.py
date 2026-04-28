@@ -352,7 +352,32 @@ class RDBMSConnector(BaseConnector):
                 continue
 
             # add create table command
-            create_table = str(CreateTable(table).compile(self._engine))
+            # Some columns may have unrecognized types (e.g. pgvector's `vector` type
+            # is reflected as NullType by SQLAlchemy). Skip those tables gracefully.
+            try:
+                create_table = str(CreateTable(table).compile(self._engine))
+            except Exception as e:
+                col_names = ", ".join(c.name for c in table.columns)
+                print(
+                    f"\n>>>>>>>> [DDL异常] 表 '{table.name}' DDL生成失败，已跳过！"
+                    f"\n>>>>>>>> 原因: {e}"
+                    f"\n>>>>>>>> 列名列表: {col_names}"
+                    f"\n>>>>>>>> 提示: 若该表含 'vector' 列，请安装 'pgvector' 包使 SQLAlchemy 识别该类型"
+                    f"\n>>>>>>>> 影响: 该表将以列名注释方式传给 LLM，无完整 DDL\n"
+                )
+                logger.warning(
+                    "Skipping table '%s' when generating DDL info: %s. "
+                    "Tip: if this table has a 'vector' column, install the "
+                    "'pgvector' Python package so SQLAlchemy can recognize the type.",
+                    table.name,
+                    e,
+                )
+                tables.append(
+                    f"-- Table: {table.name} (DDL skipped due to unrecognized "
+                    f"column type)\n-- Columns: {col_names}"
+                )
+                continue
+
             table_info = f"{create_table.rstrip()}"
             has_extra_info = (
                 self._indexes_in_table_info or self._sample_rows_in_table_info
@@ -424,6 +449,15 @@ class RDBMSConnector(BaseConnector):
             return self.get_table_info(table_names)
         except ValueError as e:
             """Format the error message"""
+            return f"Error: {e}"
+        except Exception as e:
+            # Catch unexpected errors like SQLAlchemy CompileError caused by
+            # unrecognized column types (e.g. pgvector 'vector' reflected as NullType).
+            logger.warning(
+                "get_table_info_no_throw caught unexpected error: %s. "
+                "Tip: install 'pgvector' package if your DB uses vector columns.",
+                e,
+            )
             return f"Error: {e}"
 
     def _write(self, write_sql: str):

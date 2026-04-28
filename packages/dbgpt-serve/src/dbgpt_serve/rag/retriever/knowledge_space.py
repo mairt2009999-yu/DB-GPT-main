@@ -64,14 +64,25 @@ class KnowledgeSpaceRetriever(BaseRetriever):
             self._space = space_dao.get_one({"name": space_id})
         if self._space is None:
             raise ValueError(f"Knowledge space {space_id} not found")
+        print(
+            f"[KnowledgeSpaceRetriever] 初始化存储连接器 | "
+            f"space={self._space.name} | vector_type={self._space.vector_type}"
+        )
         self._storage_connector = self.storage_manager.get_storage_connector(
             self._space.name,
             self._space.vector_type,
             self._llm_model,
         )
+        print(
+            f"[KnowledgeSpaceRetriever] 存储连接器类型: {type(self._storage_connector).__name__}"
+        )
         context_retrieve_mode = self._extract_space_retrieve_mode(self._space)
         self._retrieve_mode = (
             retrieve_mode or context_retrieve_mode or RetrieverStrategy.SEMANTIC.value
+        )
+        print(
+            f"[KnowledgeSpaceRetriever] 检索模式: {self._retrieve_mode} "
+            f"(来源: {'空间配置' if context_retrieve_mode else '默认语义检索'})"
         )
         self._executor = self._system_app.get_component(
             ComponentType.EXECUTOR_DEFAULT, ExecutorFactory
@@ -179,17 +190,25 @@ class KnowledgeSpaceRetriever(BaseRetriever):
         Return:
             List[Chunk]: list of chunks with score.
         """
+        print(
+            f"[KnowledgeSpaceRetriever] 开始检索 | query='{query[:80]}' | "
+            f"mode={self._retrieve_mode} | score_threshold={score_threshold} | top_k={self._top_k}"
+        )
         if self._retrieve_mode == RetrieverStrategy.SEMANTIC.value:
             logger.info("Starting Semantic retrieval")
+            print("[KnowledgeSpaceRetriever] 🔍 走语义向量检索路径 → 查询向量数据库")
             return await self.semantic_retrieve(query, score_threshold, filters)
         elif self._retrieve_mode == RetrieverStrategy.KEYWORD.value:
             logger.info("Starting Full Text retrieval")
+            print("[KnowledgeSpaceRetriever] 🔍 走全文检索路径 → 查询全文索引（非向量库）")
             return await self.full_text_retrieve(query, self._top_k, filters)
         elif self._retrieve_mode == RetrieverStrategy.Tree.value:
             logger.info("Starting Doc Tree retrieval")
+            print("[KnowledgeSpaceRetriever] 🔍 走树形索引检索路径")
             return await self.tree_index_retrieve(query, self._top_k, filters)
         elif self._retrieve_mode == RetrieverStrategy.HYBRID.value:
             logger.info("Starting Hybrid retrieval")
+            print("[KnowledgeSpaceRetriever] 🔍 走混合检索路径 → 同时查询向量库+全文索引+树形索引")
             tasks = []
             import asyncio
 
@@ -205,6 +224,10 @@ class KnowledgeSpaceRetriever(BaseRetriever):
                 f"Found {len(semantic_candidates)} semantic candidates "
                 f"and Found {len(full_text_candidates)} full text candidates."
                 f"and Found {len(tree_candidates)} tree candidates."
+            )
+            print(
+                f"[KnowledgeSpaceRetriever] 混合检索完成 | "
+                f"语义={len(semantic_candidates)} | 全文={len(full_text_candidates)} | 树形={len(tree_candidates)}"
             )
             candidates = semantic_candidates + full_text_candidates + tree_candidates
             # Remove duplicates
@@ -227,9 +250,18 @@ class KnowledgeSpaceRetriever(BaseRetriever):
         Return:
             List[Chunk]: list of chunks with score.
         """
-        return await self._retriever_chain.aretrieve_with_scores(
+        print(
+            f"[KnowledgeSpaceRetriever] semantic_retrieve → 进入 RetrieverChain "
+            f"(QARetriever → EmbeddingRetriever)"
+        )
+        results = await self._retriever_chain.aretrieve_with_scores(
             query, score_threshold, filters
         )
+        print(
+            f"[KnowledgeSpaceRetriever] semantic_retrieve 完成 | "
+            f"命中 {len(results)} 条 chunks"
+        )
+        return results
 
     async def full_text_retrieve(
         self,

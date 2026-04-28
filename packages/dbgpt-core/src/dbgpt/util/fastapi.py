@@ -1,11 +1,20 @@
 """FastAPI utilities."""
 
 import importlib.metadata as metadata
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import FastAPI
 from fastapi.routing import APIRouter
+
+from dbgpt.util.startup_profiler import (
+    StartupStage,
+    is_startup_timing_enabled,
+    resolve_callable_name,
+    write_startup_line,
+    write_startup_summary,
+)
 
 _FASTAPI_VERSION = metadata.version("fastapi")
 
@@ -93,8 +102,35 @@ def register_event_handler(app: FastAPI, event: str, handler: Callable):
 async def lifespan(app: FastAPI):
     # Trigger the startup event.
     global _HAS_STARTUP, _HAS_SHUTDOWN
-    for handler in _GLOBAL_STARTUP_HANDLERS:
+    detailed_timing = is_startup_timing_enabled()
+    startup_begin = time.perf_counter()
+    startup_stages: List[StartupStage] = []
+    if detailed_timing:
+        write_startup_line("fastapi", ">>> startup_handlers")
+    for idx, handler in enumerate(_GLOBAL_STARTUP_HANDLERS, start=1):
+        handler_name = resolve_callable_name(handler)
+        handler_begin = time.perf_counter()
+        if detailed_timing:
+            write_startup_line(
+                "fastapi", f">>> startup_handler[{idx}] {handler_name}"
+            )
         await handler()
+        handler_elapsed = time.perf_counter() - handler_begin
+        startup_stages.append(StartupStage(name=handler_name, elapsed=handler_elapsed))
+        if detailed_timing:
+            write_startup_line(
+                "fastapi",
+                f"<<< startup_handler[{idx}] {handler_name} | {handler_elapsed:.3f}s",
+            )
+    startup_elapsed = time.perf_counter() - startup_begin
+    if detailed_timing:
+        if startup_stages:
+            write_startup_summary(
+                "fastapi",
+                startup_stages,
+                title="startup handler summary",
+            )
+        write_startup_line("fastapi", f"<<< startup_handlers | {startup_elapsed:.3f}s")
     _HAS_STARTUP = True
     yield
     # Trigger the shutdown event.

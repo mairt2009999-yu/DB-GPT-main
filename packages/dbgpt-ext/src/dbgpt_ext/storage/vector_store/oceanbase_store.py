@@ -370,9 +370,17 @@ class OceanBaseStore(VectorStoreBase):
     ) -> List[Chunk]:
         """Perform a search on a query string and return results."""
         query_vector = self.embedding_function.embed_query(text)
-        return self._similarity_search_by_vector(
+        self._log_vector_search_request(
+            query_text=text,
+            query_vector=query_vector,
+            topk=topk,
+            filters=filters,
+        )
+        chunks = self._similarity_search_by_vector(
             embedding=query_vector, k=topk, param=param, filters=filters
         )
+        self._log_vector_search_result(query_text=text, chunks=chunks, topk=topk)
+        return chunks
 
     def similar_search_with_scores(
         self,
@@ -384,10 +392,17 @@ class OceanBaseStore(VectorStoreBase):
     ) -> List[Chunk]:
         """Perform a search on a query string and return results with score."""
         query_vector = self.embedding_function.embed_query(text)
+        self._log_vector_search_request(
+            query_text=text,
+            query_vector=query_vector,
+            topk=topk,
+            score_threshold=score_threshold,
+            filters=filters,
+        )
         docs_with_id_and_scores = self._similarity_search_with_score_by_vector(
             embedding=query_vector, k=topk, param=param, filters=filters
         )
-        return [
+        chunks = [
             Chunk(
                 metadata=doc.metadata,
                 content=doc.content,
@@ -397,6 +412,13 @@ class OceanBaseStore(VectorStoreBase):
             for doc, id, score in docs_with_id_and_scores
             if score >= score_threshold
         ]
+        self._log_vector_search_result(
+            query_text=text,
+            chunks=chunks,
+            topk=topk,
+            score_threshold=score_threshold,
+        )
+        return chunks
 
     def _similarity_search_by_vector(
         self,

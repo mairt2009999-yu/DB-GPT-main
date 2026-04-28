@@ -40,6 +40,10 @@ class StorageManager(BaseComponent):
         self, index_name: str, storage_type: str, llm_model: Optional[str] = None
     ) -> IndexStoreBase:
         """Get storage connector."""
+        print(
+            f"[StorageManager] 获取存储连接器 | "
+            f"index_name={index_name} | storage_type={storage_type}"
+        )
         supported_vector_types = self.get_vector_supported_types
         storage_config = self.storage_config()
         if storage_type.lower() in supported_vector_types:
@@ -91,7 +95,16 @@ class StorageManager(BaseComponent):
         app_config = self.system_app.config.configs.get("app_config")
         storage_config = app_config.rag.storage
         if index_name in self._store_cache:
+            print(
+                f"[StorageManager] ✅ 向量库命中缓存 | index_name='{index_name}' | "
+                f"直接从内存拉取，不需要重新向量化 | "
+                f"store_type={type(self._store_cache[index_name]).__name__}"
+            )
             return self._store_cache[index_name]
+        print(
+            f"[StorageManager] ❌ 向量库缓存未命中 | index_name='{index_name}' | "
+            f"首次创建向量存储实例，连接向量数据库中已存在数据（无需重新向量化）"
+        )
         with self._cache_lock:
             embedding_factory = self.system_app.get_component(
                 "embedding_factory", EmbeddingFactory
@@ -105,7 +118,24 @@ class StorageManager(BaseComponent):
                 max_threads=vector_store_config.max_threads,
             )
             self._store_cache[index_name] = new_store
+            print(
+                f"[StorageManager] 创建完成 | store_type={type(new_store).__name__} | "
+                f"index_name='{index_name}'"
+            )
             return new_store
+
+    def delete_from_cache(self, index_name: str):
+        """Delete storage from cache."""
+        with self._cache_lock:
+            if index_name in self._store_cache:
+                print(f"[StorageManager] 🗑️  从缓存中移除存储实例: index_name='{index_name}'")
+                del self._store_cache[index_name]
+
+    def clear_store_cache(self):
+        """Clear all storage cache."""
+        with self._cache_lock:
+            print("[StorageManager] 🗑️  清空所有向量库缓存")
+            self._store_cache.clear()
 
     def create_kg_store(
         self, index_name, llm_model: Optional[str] = None

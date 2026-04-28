@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import nullcontext
 from typing import Any, Dict, Generator, List, Optional
 
 import shortuuid
@@ -51,6 +52,10 @@ from dbgpt.model.cluster.registry import ModelRegistry
 from dbgpt.model.parameter import ModelAPIServerParameters, WorkerType
 from dbgpt.util.chat_util import transform_to_sse
 from dbgpt.util.fastapi import create_app
+from dbgpt.util.startup_profiler import (
+    StartupProfiler,
+    register_startup_success_handler,
+)
 from dbgpt.util.tracer import initialize_tracer, root_tracer, trace
 from dbgpt.util.tracer.tracer_impl import TracerParameters
 from dbgpt.util.utils import (
@@ -60,6 +65,12 @@ from dbgpt.util.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _stage(startup_profiler: Optional[StartupProfiler], name: str):
+    if startup_profiler:
+        return startup_profiler.stage(name)
+    return nullcontext()
 
 
 class APIServerException(Exception):
@@ -839,6 +850,7 @@ def initialize_apiserver(
     sys_log: Optional[LoggingParameters] = None,
     app=None,
     system_app: SystemApp = None,
+    startup_profiler: Optional[StartupProfiler] = None,
 ):
     import os
 
@@ -849,7 +861,8 @@ def initialize_apiserver(
     embedded_mod = True
     if not app:
         embedded_mod = False
-        app = create_app()
+        with _stage(startup_profiler, "create_app"):
+            app = create_app()
 
     if not system_app:
         system_app = SystemApp(app)
@@ -857,26 +870,29 @@ def initialize_apiserver(
 
     log_config = apiserver_params.log or sys_log or LoggingParameters()
     trace_config = apiserver_params.trace or sys_trace or TracerParameters()
-    setup_logging(
-        "dbgpt",
-        log_config=log_config,
-        default_logger_filename=os.path.join(LOGDIR, "dbgpt_model_apiserver.log"),
-    )
+    with _stage(startup_profiler, "setup_logging"):
+        setup_logging(
+            "dbgpt",
+            log_config=log_config,
+            default_logger_filename=os.path.join(LOGDIR, "dbgpt_model_apiserver.log"),
+        )
 
     trace_file = trace_config.file or os.path.join(
         "logs", "dbgpt_model_apiserver_tracer.jsonl"
     )
-    initialize_tracer(
-        trace_file,
-        system_app=system_app,
-        root_operation_name=trace_config.root_operation_name or "DB-GPT-APIServer",
-        tracer_parameters=trace_config,
-    )
+    with _stage(startup_profiler, "initialize_tracer"):
+        initialize_tracer(
+            trace_file,
+            system_app=system_app,
+            root_operation_name=trace_config.root_operation_name or "DB-GPT-APIServer",
+            tracer_parameters=trace_config,
+        )
 
     if apiserver_params.api_keys:
         api_settings.api_keys = apiserver_params.api_keys.strip().split(",")
 
-    app.include_router(router, prefix="/api", tags=["APIServer"])
+    with _stage(startup_profiler, "mount_router"):
+        app.include_router(router, prefix="/api", tags=["APIServer"])
 
     @app.exception_handler(APIServerException)
     async def validation_apiserver_exception_handler(request, exc: APIServerException):
@@ -891,22 +907,31 @@ def initialize_apiserver(
         logger.warning(message)
         return create_error_response(ErrorCode.VALIDATION_TYPE_ERROR, message)
 
-    _initialize_all(apiserver_params.controller_addr, system_app)
+    with _stage(startup_profiler, "initialize_all"):
+        _initialize_all(apiserver_params.controller_addr, system_app)
 
     if not embedded_mod:
         import uvicorn
 
         # https://github.com/encode/starlette/issues/617
-        cors_app = CORSMiddleware(
-            app=app,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-            allow_headers=["*"],
-        )
-        log_level = "info"
-        if log_config:
-            log_level = logging_str_to_uvicorn_level(log_config.level)
+        with _stage(startup_profiler, "run_uvicorn_prepare"):
+            cors_app = CORSMiddleware(
+                app=app,
+                allow_origins=["*"],
+                allow_credentials=True,
+                allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                allow_headers=["*"],
+            )
+            log_level = "info"
+            if log_config:
+                log_level = logging_str_to_uvicorn_level(log_config.level)
+        with _stage(startup_profiler, "register_startup_success_handler"):
+            register_startup_success_handler(
+                app=app,
+                profiler=startup_profiler,
+                host=apiserver_params.host,
+                port=apiserver_params.port,
+            )
         uvicorn.run(
             cors_app,
             host=apiserver_params.host,
@@ -933,29 +958,37 @@ def run_apiserver(config_file: str):
     from dbgpt.configs.model_config import ROOT_PATH
     from dbgpt.util.configure import ConfigurationManager
 
-    if not os.path.isabs(config_file) and not os.path.exists(config_file):
-        config_file = os.path.join(ROOT_PATH, config_file)
+    startup_profiler = StartupProfiler("apiserver")
 
-    cfg = ConfigurationManager.from_file(config_file)
-    apiserver_params = cfg.parse_config(
-        ModelAPIServerParameters, prefix="service.model.api", hook_section="hooks"
-    )
+    with startup_profiler.stage("resolve_config_path"):
+        if not os.path.isabs(config_file) and not os.path.exists(config_file):
+            config_file = os.path.join(ROOT_PATH, config_file)
+
+    with startup_profiler.stage("load_configuration"):
+        cfg = ConfigurationManager.from_file(config_file)
+    with startup_profiler.stage("parse_apiserver_config"):
+        apiserver_params = cfg.parse_config(
+            ModelAPIServerParameters, prefix="service.model.api", hook_section="hooks"
+        )
 
     sys_trace: Optional[TracerParameters] = None
     sys_log: Optional[LoggingParameters] = None
 
-    if cfg.exists("trace"):
-        sys_trace = cfg.parse_config(TracerParameters, prefix="trace")
-    if cfg.exists("log"):
-        sys_log = cfg.parse_config(LoggingParameters, prefix="log")
+    with startup_profiler.stage("parse_global_trace_log"):
+        if cfg.exists("trace"):
+            sys_trace = cfg.parse_config(TracerParameters, prefix="trace")
+        if cfg.exists("log"):
+            sys_log = cfg.parse_config(LoggingParameters, prefix="log")
 
     log_config = apiserver_params.log or sys_log or LoggingParameters()
     trace_config = apiserver_params.trace or sys_trace or TracerParameters()
-    initialize_apiserver(
-        apiserver_params,
-        sys_trace=trace_config,
-        sys_log=log_config,
-    )
+    with startup_profiler.stage("initialize_apiserver"):
+        initialize_apiserver(
+            apiserver_params,
+            sys_trace=trace_config,
+            sys_log=log_config,
+            startup_profiler=startup_profiler,
+        )
 
 
 if __name__ == "__main__":

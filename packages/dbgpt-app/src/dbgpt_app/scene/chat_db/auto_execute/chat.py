@@ -57,6 +57,16 @@ class ChatWithDbAutoExecute(BaseChat):
             raise ValueError("Could not import DBSummaryClient. ")
         user_input = self.current_user_input.last_text
         client = DBSummaryClient(system_app=self.system_app)
+
+        print(
+            f"\n{'>'*60}"
+            f"\n>>>>>>>> [DB对话任务] 开始加载数据库 Schema 向量上下文"
+            f"\n>>>>>>>> 数据库: {self.db_name}"
+            f"\n>>>>>>>> 用户问题: {user_input[:120]}"
+            f"\n>>>>>>>> top_k={self.curr_config.schema_retrieve_top_k}"
+            f"\n{'>'*60}"
+        )
+
         try:
             with root_tracer.start_span("ChatWithDbAutoExecute.get_db_summary"):
                 table_infos = await blocking_func_to_async(
@@ -66,16 +76,48 @@ class ChatWithDbAutoExecute(BaseChat):
                     user_input,
                     self.curr_config.schema_retrieve_top_k,
                 )
+            print(
+                f"\n>>>>>>>> [DB对话任务] Schema 向量检索成功"
+                f"\n>>>>>>>> 命中相关表数量: {len(table_infos)}"
+                f"\n>>>>>>>> 检索路径: 向量数据库 → DBSchemaRetriever"
+                f"\n{'>'*60}\n"
+            )
+            # ── 零命中降级：vector检索失败时直接读取数据库所有表结构 ──────────
+            if not table_infos:
+                logger.warning(
+                    "Vector search returned 0 results for db=%s query='%s', "
+                    "falling back to full DDL scan.",
+                    self.db_name,
+                    user_input[:80],
+                )
+                table_infos = await blocking_func_to_async(
+                    self._executor, self.database.table_simple_info
+                )
+                if len(table_infos) > self.curr_config.schema_max_tokens:
+                    table_infos = table_infos[: self.curr_config.schema_max_tokens]
+                print(
+                    f">>>>>>>> [DB对话任务] 零命中降级完成 | 获取 {len(table_infos)} 条表结构"
+                    f"\n{'>'*60}\n"
+                )
+            # ─────────────────────────────────────────────────────────────────
         except Exception as e:
+            print(
+                f"\n>>>>>>>> [DB对话任务] ⚠️  向量检索失败，降级到全量 DDL 读取！"
+                f"\n>>>>>>>> 失败原因: {e}"
+                f"\n>>>>>>>> 降级路径: table_simple_info() 直接读取数据库表结构"
+                f"\n{'>'*60}"
+            )
             logger.error(f"Retrieved table info error: {str(e)}")
             table_infos = await blocking_func_to_async(
                 self._executor, self.database.table_simple_info
             )
             if len(table_infos) > self.curr_config.schema_max_tokens:
-                # Load all tables schema, must be less then schema_max_tokens
-                # Here we just truncate the table_infos
-                # TODO: Count the number of tokens by LLMClient
                 table_infos = table_infos[: self.curr_config.schema_max_tokens]
+            print(
+                f">>>>>>>> [DB对话任务] 降级读取完成 | 获取 {len(table_infos)} 条表信息"
+                f"\n{'>'*60}\n"
+            )
+
 
         input_values = {
             "db_name": self.db_name,

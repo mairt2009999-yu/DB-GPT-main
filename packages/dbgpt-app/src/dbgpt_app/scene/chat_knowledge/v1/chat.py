@@ -141,6 +141,14 @@ class ChatKnowledge(BaseChat):
         from dbgpt.util.chat_util import run_async_tasks
 
         user_input = self.current_user_input.last_text
+        print(
+            f"\n{'>'*60}"
+            f"\n>>>>>>>> [知识库对话] 开始加载知识库上下文"
+            f"\n>>>>>>>> 知识空间: {self.knowledge_space}"
+            f"\n>>>>>>>> 用户问题: {user_input[:120]}"
+            f"\n>>>>>>>> top_k={self.top_k} | recall_score={self.recall_score}"
+            f"\n{'>'*60}"
+        )
 
         tasks = [self.execute_similar_search(user_input)]
         candidates_with_scores = await run_async_tasks(tasks=tasks, concurrency_limit=1)
@@ -167,6 +175,15 @@ class ChatKnowledge(BaseChat):
                     for d in candidates_with_scores
                 ]
             )
+        )
+        print(
+            f"\n{'>'*60}"
+            f"\n>>>>>>>> [知识库对话] 上下文加载完成"
+            f"\n>>>>>>>> 命中 chunks 数: {len(candidates_with_scores)}"
+            f"\n>>>>>>>> 关联文档来源: {self.relations}"
+            f"\n>>>>>>>> context 长度: {len(context)} 字符"
+            f"\n>>>>>>>> context 预览 (前300字):\n{context[:300]}"
+            f"\n{'>'*60}\n"
         )
         input_values = {
             "context": context,
@@ -251,9 +268,31 @@ class ChatKnowledge(BaseChat):
 
     async def execute_similar_search(self, query):
         """execute similarity search"""
+        print(
+            f"\n{'>'*60}"
+            f"\n>>>>>>>> [知识库检索] 开始向量相似检索"
+            f"\n>>>>>>>> 知识空间: {self.knowledge_space}"
+            f"\n>>>>>>>> 检索问题: {query[:120]}"
+            f"\n>>>>>>>> top_k={self.top_k} | recall_score(阈值)={self.recall_score}"
+            f"\n{'>'*60}"
+        )
         with root_tracer.start_span(
             "execute_similar_search", metadata={"query": query}
         ):
-            return await self._space_retriever.aretrieve_with_scores(
+            results = await self._space_retriever.aretrieve_with_scores(
                 query, self.recall_score
             )
+            if results:
+                scores_preview = [round(c.score, 4) for c in results[:5]]
+                content_preview = results[0].content[:150] if results else ""
+            else:
+                scores_preview = []
+                content_preview = "(无结果)"
+            print(
+                f"\n>>>>>>>> [知识库检索] 检索完成"
+                f"\n>>>>>>>> 返回 {len(results)} 条 chunks"
+                f"\n>>>>>>>> 前5条相似度分数: {scores_preview}"
+                f"\n>>>>>>>> 最高分 chunk 内容预览: {content_preview}"
+                f"\n{'>'*60}\n"
+            )
+            return results

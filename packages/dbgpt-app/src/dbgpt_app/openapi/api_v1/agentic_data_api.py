@@ -39,9 +39,203 @@ if TYPE_CHECKING:
 REACT_AGENT_MEMORY_CACHE: Dict[str, "GptsMemory"] = {}
 
 DEFAULT_SKILLS_DIR = SKILLS_DIR
+REACT_KNOWLEDGE_LOG_PREFIX = ">>>>>>>> [ReAct知识库]"
+REACT_KNOWLEDGE_CONTENT_PREVIEW_LIMIT = 500
 AUTO_DATA_MARKER_PATTERN = re.compile(
     r"###([A-Z0-9_]+)_START###\s*(.*?)\s*###\1_END###", re.DOTALL
 )
+
+
+def _emit_react_knowledge_log(message: str, level: int = logging.INFO) -> None:
+    log_line = f"{REACT_KNOWLEDGE_LOG_PREFIX} {message}"
+    print(log_line)
+    logger.log(level, log_line)
+
+
+def _normalize_react_knowledge_preview(
+    content: Any, preview_limit: int = REACT_KNOWLEDGE_CONTENT_PREVIEW_LIMIT
+) -> str:
+    preview = re.sub(r"\s+", " ", str(content or "")).strip()
+    if preview_limit > 0 and len(preview) > preview_limit:
+        return f"{preview[:preview_limit]}..."
+    return preview
+
+
+def _format_react_knowledge_chunk_log(
+    index: int,
+    chunk: Any,
+    preview_limit: int = REACT_KNOWLEDGE_CONTENT_PREVIEW_LIMIT,
+) -> str:
+    score = getattr(chunk, "score", None)
+    if isinstance(score, (int, float)):
+        score_text = f"{score:.4f}"
+    else:
+        score_text = str(score)
+
+    metadata = getattr(chunk, "metadata", None) or {}
+    try:
+        metadata_text = json.dumps(metadata, ensure_ascii=False, default=str)
+    except Exception:
+        metadata_text = str(metadata)
+
+    content_preview = _normalize_react_knowledge_preview(
+        getattr(chunk, "content", ""), preview_limit
+    )
+    return (
+        f"{REACT_KNOWLEDGE_LOG_PREFIX} 命中chunk[{index}]"
+        f" | score={score_text}"
+        f" | retriever={getattr(chunk, 'retriever', None)}"
+        f" | chunk_id={getattr(chunk, 'chunk_id', None)}"
+        f" | metadata={metadata_text}"
+        f" | content_preview={content_preview}"
+    )
+
+
+def _format_react_knowledge_score(score: Any) -> str:
+    if isinstance(score, (int, float)):
+        return f"{score:.4f}"
+    return str(score)
+
+
+def _serialize_react_knowledge_chunk(index: int, chunk: Any) -> Dict[str, Any]:
+    metadata = getattr(chunk, "metadata", None) or {}
+    return {
+        "index": index,
+        "score": getattr(chunk, "score", None),
+        "retriever": getattr(chunk, "retriever", None),
+        "chunk_id": getattr(chunk, "chunk_id", None),
+        "metadata": metadata,
+        "content": str(getattr(chunk, "content", "") or ""),
+    }
+
+
+def _format_react_knowledge_retrieved_data_log(
+    chunks: List[Any], limit: int = 5
+) -> str:
+    payload = [
+        _serialize_react_knowledge_chunk(index, chunk)
+        for index, chunk in enumerate(chunks[:limit], 1)
+    ]
+    data_text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    return (
+        f"{REACT_KNOWLEDGE_LOG_PREFIX} 召回数据明细_START\n"
+        f"{data_text}\n"
+        f"{REACT_KNOWLEDGE_LOG_PREFIX} 召回数据明细_END"
+    )
+
+
+def _format_react_knowledge_prompt_item(index: int, chunk: Any) -> str:
+    metadata = getattr(chunk, "metadata", None) or {}
+    try:
+        metadata_text = json.dumps(metadata, ensure_ascii=False, default=str)
+    except Exception:
+        metadata_text = str(metadata)
+
+    return (
+        f"### 知识片段 {index}\n"
+        f"- score: {_format_react_knowledge_score(getattr(chunk, 'score', None))}\n"
+        f"- retriever: {getattr(chunk, 'retriever', None)}\n"
+        f"- chunk_id: {getattr(chunk, 'chunk_id', None)}\n"
+        f"- metadata: {metadata_text}\n"
+        f"- content:\n{str(getattr(chunk, 'content', '') or '')}"
+    )
+
+
+def _format_react_knowledge_prompt_context(
+    knowledge_space: str,
+    retriever_name: Optional[str],
+    retriever_desc: Optional[str],
+    chunks: List[Any],
+) -> str:
+    knowledge_text = "\n\n".join(
+        _format_react_knowledge_prompt_item(index, chunk)
+        for index, chunk in enumerate(chunks[:5], 1)
+    )
+    return f"""
+## 业务知识（已根据问题自动检索，共 {len(chunks)} 条）
+知识空间: {retriever_name or knowledge_space}
+描述: {retriever_desc or "Knowledge retrieval available"}
+
+{knowledge_text}
+
+提示: 如需更多信息，可使用 'knowledge_retrieve' 工具进行补充检索。
+"""
+
+
+def _format_react_knowledge_empty_context(
+    knowledge_space: str,
+    retriever_name: Optional[str],
+    retriever_desc: Optional[str],
+) -> str:
+    return f"""
+## Knowledge Base
+- Knowledge space: {retriever_name or knowledge_space}
+- Description: {retriever_desc or "Knowledge retrieval available"}
+- 未检索到相关知识。可使用 'knowledge_retrieve' 工具手动检索。
+"""
+
+
+async def _build_react_knowledge_context(
+    knowledge_resource: Any,
+    knowledge_space: str,
+    user_input: str,
+) -> str:
+    retriever_name = getattr(knowledge_resource, "retriever_name", None)
+    retriever_desc = getattr(knowledge_resource, "retriever_desc", None)
+    _emit_react_knowledge_log(
+        "开始主动预检索"
+        f" | space={knowledge_space}"
+        f" | retriever_name={retriever_name}"
+        f" | query={user_input}"
+        " | top_k=4"
+    )
+    try:
+        chunks = await knowledge_resource.retrieve(user_input)
+        _emit_react_knowledge_log(
+            "主动预检索完成"
+            f" | space={knowledge_space}"
+            f" | query={user_input}"
+            f" | 命中数量={len(chunks)}"
+        )
+        if chunks:
+            for idx, chunk in enumerate(chunks[:5], 1):
+                chunk_log_line = _format_react_knowledge_chunk_log(idx, chunk)
+                print(chunk_log_line)
+                logger.info(chunk_log_line)
+            retrieved_data_log = _format_react_knowledge_retrieved_data_log(
+                chunks, limit=5
+            )
+            print(retrieved_data_log)
+            logger.info(retrieved_data_log)
+            return _format_react_knowledge_prompt_context(
+                knowledge_space,
+                retriever_name,
+                retriever_desc,
+                chunks,
+            )
+
+        _emit_react_knowledge_log(
+            f"主动预检索无命中 | space={knowledge_space} | query={user_input}",
+            logging.WARNING,
+        )
+        return _format_react_knowledge_empty_context(
+            knowledge_space,
+            retriever_name,
+            retriever_desc,
+        )
+    except Exception as e:
+        _emit_react_knowledge_log(
+            "主动预检索失败"
+            f" | space={knowledge_space}"
+            f" | query={user_input}"
+            f" | error={str(e)}",
+            logging.WARNING,
+        )
+        return f"""
+## Knowledge Base
+- Warning: Failed to pre-retrieve knowledge space '{knowledge_space}'. Error: {str(e)}
+- You can use the 'knowledge_retrieve' tool to search this knowledge base manually.
+"""
 
 
 def _extract_auto_data_markers(text: str) -> tuple[str, Dict[str, str]]:
@@ -1005,22 +1199,36 @@ async def _react_agent_stream(
                 system_app=CFG.SYSTEM_APP,
             )
             knowledge_resources.append(knowledge_resource)
-            knowledge_context = f"""
-## Knowledge Base
-- Knowledge space: {knowledge_resource.retriever_name or knowledge_space}
-- Description: {knowledge_resource.retriever_desc or "Knowledge retrieval available"}
-- You can use the 'knowledge_retrieve' tool to search this knowledge base.
-"""
             logger.info(
                 f"Loaded knowledge space resource: {knowledge_space} "
                 f"(name: {knowledge_resource.retriever_name})"
             )
+            _emit_react_knowledge_log(
+                "已加载知识库资源"
+                f" | space={knowledge_space}"
+                f" | retriever_name={knowledge_resource.retriever_name}"
+                f" | description={knowledge_resource.retriever_desc}"
+                " | top_k=4"
+            )
+            knowledge_context = await _build_react_knowledge_context(
+                knowledge_resource=knowledge_resource,
+                knowledge_space=knowledge_space,
+                user_input=user_input,
+            )
         except Exception as e:
             logger.warning(f"Failed to load knowledge space resource: {e}", exc_info=e)
+            _emit_react_knowledge_log(
+                f"知识库资源加载失败 | space={knowledge_space} | error={str(e)}",
+                logging.WARNING,
+            )
             knowledge_context = f"""
 ## Knowledge Base
 - Warning: Failed to load knowledge space '{knowledge_space}'. Error: {str(e)}
 """
+    else:
+        _emit_react_knowledge_log(
+            "未配置知识库 | knowledge_space为空，本次不会提供可用知识库资源"
+        )
 
     # Step 4: Load database connector if specified in ext_info
     database_connector = None
@@ -1400,6 +1608,11 @@ print(json.dumps(summary, ensure_ascii=False))
     )
     async def knowledge_retrieve(query: str) -> str:
         if not knowledge_resources:
+            _emit_react_knowledge_log(
+                "knowledge_retrieve被调用但无可用知识库资源"
+                f" | query={query}",
+                logging.WARNING,
+            )
             return json.dumps(
                 {
                     "chunks": [
@@ -1413,9 +1626,27 @@ print(json.dumps(summary, ensure_ascii=False))
             )
 
         resource = knowledge_resources[0]
+        _emit_react_knowledge_log(
+            "开始执行knowledge_retrieve"
+            f" | query={query}"
+            f" | retriever_name={getattr(resource, 'retriever_name', None)}"
+            f" | description={getattr(resource, 'retriever_desc', None)}"
+        )
         try:
             chunks = await resource.retrieve(query)
+            _emit_react_knowledge_log(
+                f"knowledge_retrieve完成 | query={query} | 命中数量={len(chunks)}"
+            )
             if chunks:
+                for idx, chunk in enumerate(chunks[:5], 1):
+                    chunk_log_line = _format_react_knowledge_chunk_log(idx, chunk)
+                    print(chunk_log_line)
+                    logger.info(chunk_log_line)
+                retrieved_data_log = _format_react_knowledge_retrieved_data_log(
+                    chunks, limit=5
+                )
+                print(retrieved_data_log)
+                logger.info(retrieved_data_log)
                 content = "\n".join(
                     [f"[{i + 1}] {chunk.content}" for i, chunk in enumerate(chunks[:5])]
                 )
@@ -1434,6 +1665,10 @@ print(json.dumps(summary, ensure_ascii=False))
                     ensure_ascii=False,
                 )
             else:
+                _emit_react_knowledge_log(
+                    f"knowledge_retrieve无命中 | query={query}",
+                    logging.WARNING,
+                )
                 return json.dumps(
                     {
                         "chunks": [
@@ -1446,6 +1681,10 @@ print(json.dumps(summary, ensure_ascii=False))
                     ensure_ascii=False,
                 )
         except Exception as e:
+            _emit_react_knowledge_log(
+                f"knowledge_retrieve执行失败 | query={query} | error={str(e)}",
+                logging.WARNING,
+            )
             return json.dumps(
                 {
                     "chunks": [

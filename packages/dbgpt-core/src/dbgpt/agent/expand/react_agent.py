@@ -178,21 +178,48 @@ class ReActAgent(ConversableAgent):
 
     async def load_resource(self, question: str, is_retry_chat: bool = False):
         """Load agent bind resource."""
+        print(
+            f"[ReActAgent] 🔄 load_resource 被调用 | "
+            f"has_resource={self.resource is not None} | "
+            f"question={question[:80] if question else 'None'}"
+        )
         if self.resource:
+            print(
+                f"[ReActAgent] 📦 原始资源类型: {self.resource.type()} | "
+                f"资源名称: {self.resource.name}"
+            )
 
             def _remove_tool(r: Resource):
                 if r.type() == ResourceType.Tool:
+                    print(f"[ReActAgent] ⏩ 过滤掉 Tool 资源: {r.name}")
                     return None
+                print(
+                    f"[ReActAgent] ✅ 保留非 Tool 资源: {r.name} "
+                    f"(type={r.type()})"
+                )
                 return r
 
             # Remove all tools from the resource
             # We will handle tools separately
             new_resource = self.resource.apply(apply_func=_remove_tool)
             if new_resource:
+                print(
+                    f"[ReActAgent] 📖 过滤后仍有资源，开始调用 get_prompt() | "
+                    f"resource_type={new_resource.type()}"
+                )
                 resource_prompt, resource_reference = await new_resource.get_prompt(
                     lang=self.language, question=question
                 )
+                print(
+                    f"[ReActAgent] 📝 get_prompt 结果 | "
+                    f"prompt_length={len(resource_prompt) if resource_prompt else 0} | "
+                    f"has_reference={resource_reference is not None}"
+                )
                 return resource_prompt, resource_reference
+            else:
+                print("[ReActAgent] ⚠️ 过滤 Tool 后无剩余资源（没有 Knowledge 资源绑定）")
+        else:
+            print("[ReActAgent] ⚠️ 当前 Agent 没有绑定任何资源")
         return None, None
 
     def prepare_act_param(

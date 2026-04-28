@@ -1,5 +1,6 @@
 """Embedding retriever."""
 
+import logging
 from functools import reduce
 from typing import Any, Dict, List, Optional, cast
 
@@ -11,6 +12,8 @@ from dbgpt.storage.base import IndexStoreBase
 from dbgpt.storage.vector_store.filters import MetadataFilters
 from dbgpt.util.chat_util import run_async_tasks
 from dbgpt.util.tracer import root_tracer
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingRetriever(BaseRetriever):
@@ -175,6 +178,11 @@ class EmbeddingRetriever(BaseRetriever):
         Return:
             List[Chunk]: list of chunks with score
         """
+        print(
+            f"[EmbeddingRetriever] 启动向量检索 | query='{query[:80]}' | "
+            f"top_k={self._top_k} | score_threshold={score_threshold} | "
+            f"index_store={type(self._index_store).__name__}"
+        )
         queries = [query]
         if self._query_rewrite:
             with root_tracer.start_span(
@@ -197,6 +205,11 @@ class EmbeddingRetriever(BaseRetriever):
                     origin_query=query, context=context, nums=1
                 )
                 queries.extend(new_queries)
+                print(
+                    f"[EmbeddingRetriever] 查询改写完成 | "
+                    f"原始查询: '{query[:60]}' | "
+                    f"改写后查询数: {len(queries)}"
+                )
 
         with root_tracer.start_span(
             "dbgpt.rag.retriever.embeddings.similarity_search_with_score",
@@ -226,6 +239,11 @@ class EmbeddingRetriever(BaseRetriever):
             new_candidates_with_score = await self._rerank.arank(
                 new_candidates_with_score, query
             )
+            print(
+                f"[EmbeddingRetriever] 向量检索完成 | "
+                f"命中 {len(new_candidates_with_score)} 条 chunks | "
+                f"reranker={self._rerank.__class__.__name__}"
+            )
             return new_candidates_with_score
 
     async def _similarity_search(
@@ -242,7 +260,16 @@ class EmbeddingRetriever(BaseRetriever):
                 "query": query,
             },
         ):
-            return await self._index_store.asimilar_search(query, self._top_k, filters)
+            chunks = await self._index_store.asimilar_search(
+                query, self._top_k, filters
+            )
+            self._log_retrieve_result(
+                query=query,
+                chunks=chunks,
+                topk=self._top_k,
+                score_threshold=None,
+            )
+            return chunks
 
     async def _run_async_tasks(self, tasks) -> List[Chunk]:
         """Run async tasks."""
@@ -266,9 +293,59 @@ class EmbeddingRetriever(BaseRetriever):
                 "score_threshold": score_threshold,
             },
         ):
-            return await self._index_store.asimilar_search_with_scores(
+            print(
+                f"[EmbeddingRetriever] → 向量数据库查询 | "
+                f"store={type(self._index_store).__name__} | "
+                f"query='{query[:60]}' | top_k={self._top_k} | score_threshold={score_threshold}"
+            )
+            chunks = await self._index_store.asimilar_search_with_scores(
                 query, self._top_k, score_threshold, filters
             )
+            scores_preview = [round(c.score, 4) for c in chunks[:5]]
+            print(
+                f"[EmbeddingRetriever] ← 向量数据库返回 | "
+                f"命中 {len(chunks)} 条 | 分数预览={scores_preview}"
+            )
+            self._log_retrieve_result(
+                query=query,
+                chunks=chunks,
+                topk=self._top_k,
+                score_threshold=score_threshold,
+            )
+            return chunks
+
+    def _log_retrieve_result(
+        self,
+        *,
+        query: str,
+        chunks: List[Chunk],
+        topk: int,
+        score_threshold: Optional[float],
+    ) -> None:
+        """Log retriever output summary."""
+        preview = []
+        for chunk in chunks[:3]:
+            content = chunk.content or ""
+            preview.append(
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "score": chunk.score,
+                    "content_preview": (
+                        f"{content[:120]}...(truncated)"
+                        if len(content) > 120
+                        else content
+                    ).replace("\n", "\\n"),
+                }
+            )
+        logger.info(
+            "EmbeddingRetriever result | query=%s | topk=%s | score_threshold=%s | "
+            "hit_count=%s | preview=%s",
+            query.replace("\n", "\\n"),
+            topk,
+            score_threshold,
+            len(chunks),
+            preview,
+        )
 
     @classmethod
     def name(cls):

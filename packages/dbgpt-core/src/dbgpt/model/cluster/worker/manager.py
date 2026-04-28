@@ -54,6 +54,10 @@ from dbgpt.util.parameter_utils import (
     ParameterDescription,
     _get_dict_from_obj,
 )
+from dbgpt.util.startup_profiler import (
+    StartupProfiler,
+    register_startup_success_handler,
+)
 from dbgpt.util.system_utils import get_system_info
 from dbgpt.util.tracer import SpanType, SpanTypeRunName, initialize_tracer, root_tracer
 from dbgpt.util.tracer.tracer_impl import TracerParameters
@@ -1298,15 +1302,22 @@ def run_worker_manager(
     **kwargs,
 ):
     global worker_manager
-    worker_params, deploy_model_params, sys_trace, sys_log = _parse_config(config_file)
+    startup_profiler = StartupProfiler("worker")
+    with startup_profiler.stage("parse_config"):
+        worker_params, deploy_model_params, sys_trace, sys_log = _parse_config(
+            config_file
+        )
 
     log_config = worker_params.log or sys_log or LoggingParameters()
     trace_config = worker_params.trace or sys_trace or TracerParameters()
-    setup_logging(
-        "dbgpt",
-        log_config=log_config,
-        default_logger_filename=os.path.join(LOGDIR, "dbgpt_model_worker_manager.log"),
-    )
+    with startup_profiler.stage("setup_logging"):
+        setup_logging(
+            "dbgpt",
+            log_config=log_config,
+            default_logger_filename=os.path.join(
+                LOGDIR, "dbgpt_model_worker_manager.log"
+            ),
+        )
 
     embedded_mod = True
     logger.info(f"Worker params: {worker_params}")
@@ -1314,49 +1325,62 @@ def run_worker_manager(
     if not app:
         # Run worker manager independently
         embedded_mod = False
-        app = _setup_fastapi(worker_params, system_app=system_app)
+        with startup_profiler.stage("setup_fastapi"):
+            app = _setup_fastapi(worker_params, system_app=system_app)
     system_app._asgi_app = app
 
     trace_file = trace_config.file or os.path.join(
         "logs", "dbgpt_model_worker_manager_tracer.jsonl"
     )
-    initialize_tracer(
-        trace_file,
-        system_app=system_app,
-        root_operation_name=trace_config.root_operation_name or "DB-GPT-ModelWorker",
-        tracer_parameters=trace_config,
-    )
-    if isinstance(deploy_model_params, LLMDeployModelParameters):
-        _start_local_worker(
-            worker_manager,
-            worker_params,
-            deploy_model_params,
+    with startup_profiler.stage("initialize_tracer"):
+        initialize_tracer(
+            trace_file,
+            system_app=system_app,
+            root_operation_name=trace_config.root_operation_name
+            or "DB-GPT-ModelWorker",
+            tracer_parameters=trace_config,
         )
-    elif isinstance(deploy_model_params, EmbeddingDeployModelParameters):
-        worker_params.worker_type = WorkerType.TEXT2VEC
-        _start_local_worker(
-            worker_manager,
-            worker_params,
-            deploy_model_params,
-        )
+    with startup_profiler.stage("initialize_local_worker"):
+        if isinstance(deploy_model_params, LLMDeployModelParameters):
+            _start_local_worker(
+                worker_manager,
+                worker_params,
+                deploy_model_params,
+            )
+        elif isinstance(deploy_model_params, EmbeddingDeployModelParameters):
+            worker_params.worker_type = WorkerType.TEXT2VEC
+            _start_local_worker(
+                worker_manager,
+                worker_params,
+                deploy_model_params,
+            )
 
-    elif isinstance(deploy_model_params, RerankerDeployModelParameters):
-        worker_params.worker_type = WorkerType.RERANKER
-        _start_local_worker(
-            worker_manager,
-            worker_params,
-            deploy_model_params,
-        )
-    else:
-        raise ValueError(f"Unsupported deploy model params: {deploy_model_params}")
-    worker_manager.after_start(start_listener)
+        elif isinstance(deploy_model_params, RerankerDeployModelParameters):
+            worker_params.worker_type = WorkerType.RERANKER
+            _start_local_worker(
+                worker_manager,
+                worker_params,
+                deploy_model_params,
+            )
+        else:
+            raise ValueError(f"Unsupported deploy model params: {deploy_model_params}")
+    with startup_profiler.stage("worker_after_start"):
+        worker_manager.after_start(start_listener)
 
     if include_router:
-        app.include_router(router, prefix="/api")
+        with startup_profiler.stage("include_router"):
+            app.include_router(router, prefix="/api")
 
     if not embedded_mod:
         import uvicorn
 
+        with startup_profiler.stage("register_startup_success_handler"):
+            register_startup_success_handler(
+                app=app,
+                profiler=startup_profiler,
+                host=worker_params.host,
+                port=worker_params.port,
+            )
         uvicorn.run(
             app, host=worker_params.host, port=worker_params.port, log_level="info"
         )

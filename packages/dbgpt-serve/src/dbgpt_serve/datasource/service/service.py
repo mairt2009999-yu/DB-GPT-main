@@ -157,6 +157,8 @@ class Service(
                 self._db_summary_client.db_summary_embedding,
                 db_name,
                 str_db_type,
+                "serve.datasource.create",
+                False,
             )
         except Exception as e:
             raise ValueError("Add db connect info error!" + str(e))
@@ -311,5 +313,7 @@ class Service(
             self._db_summary_client.db_summary_embedding,
             db_config.db_name,
             db_config.db_type,
+            "serve.datasource.refresh",
+            True,
         )
         return True

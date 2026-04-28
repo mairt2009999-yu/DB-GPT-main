@@ -1,6 +1,7 @@
 import logging
 import os
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter
@@ -14,6 +15,10 @@ from dbgpt.util.api_utils import APIMixin
 from dbgpt.util.api_utils import _api_remote as api_remote
 from dbgpt.util.api_utils import _sync_api_remote as sync_api_remote
 from dbgpt.util.fastapi import create_app
+from dbgpt.util.startup_profiler import (
+    StartupProfiler,
+    register_startup_success_handler,
+)
 from dbgpt.util.tracer.tracer_impl import (
     TracerParameters,
     initialize_tracer,
@@ -26,6 +31,12 @@ from dbgpt.util.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _stage(startup_profiler: Optional[StartupProfiler], name: str):
+    if startup_profiler:
+        return startup_profiler.stage(name)
+    return nullcontext()
 
 
 class BaseModelController(BaseComponent, ABC):
@@ -174,6 +185,7 @@ def initialize_controller(
     controller_params: Optional[ModelControllerParameters] = None,
     system_app: Optional[SystemApp] = None,
     trace_config: Optional[TracerParameters] = None,
+    startup_profiler: Optional[StartupProfiler] = None,
 ):
     global controller
     if remote_controller_addr:
@@ -189,8 +201,10 @@ def initialize_controller(
     else:
         import uvicorn
 
-        setup_http_service_logging()
-        app = create_app()
+        with _stage(startup_profiler, "setup_http_service_logging"):
+            setup_http_service_logging()
+        with _stage(startup_profiler, "create_app"):
+            app = create_app()
         if not system_app:
             system_app = SystemApp(app)
         if not controller_params:
@@ -199,15 +213,24 @@ def initialize_controller(
         trace_file = trace_config.file or os.path.join(
             "logs", "dbgpt_model_controller_tracer.jsonl"
         )
-        initialize_tracer(
-            trace_file,
-            system_app=system_app,
-            root_operation_name=trace_config.root_operation_name
-            or "DB-GPT-ModelController",
-            tracer_parameters=trace_config,
-        )
+        with _stage(startup_profiler, "initialize_tracer"):
+            initialize_tracer(
+                trace_file,
+                system_app=system_app,
+                root_operation_name=trace_config.root_operation_name
+                or "DB-GPT-ModelController",
+                tracer_parameters=trace_config,
+            )
 
-        app.include_router(router, prefix="/api", tags=["Model Controller"])
+        with _stage(startup_profiler, "mount_router"):
+            app.include_router(router, prefix="/api", tags=["Model Controller"])
+        with _stage(startup_profiler, "register_startup_success_handler"):
+            register_startup_success_handler(
+                app=app,
+                profiler=startup_profiler,
+                host=controller_params.host,
+                port=controller_params.port,
+            )
         uvicorn.run(
             app,
             host=controller_params.host,
@@ -332,44 +355,54 @@ def run_model_controller(config_file: str):
     from dbgpt.util.configure import ConfigurationManager
     from dbgpt_serve.datasource.manages.connector_manager import ConnectorManager
 
+    startup_profiler = StartupProfiler("controller")
     cm = ConnectorManager(None)  # noqa: F841
     # pre import all datasource
-    cm.on_init()
+    with startup_profiler.stage("connector_manager_init"):
+        cm.on_init()
 
-    if not os.path.isabs(config_file) and not os.path.exists(config_file):
-        config_file = os.path.join(ROOT_PATH, config_file)
+    with startup_profiler.stage("resolve_config_path"):
+        if not os.path.isabs(config_file) and not os.path.exists(config_file):
+            config_file = os.path.join(ROOT_PATH, config_file)
 
-    cfg = ConfigurationManager.from_file(config_file)
-    controller_params = cfg.parse_config(
-        ModelControllerParameters,
-        prefix="service.model.controller",
-        hook_section="hooks",
-    )
+    with startup_profiler.stage("load_configuration"):
+        cfg = ConfigurationManager.from_file(config_file)
+    with startup_profiler.stage("parse_controller_config"):
+        controller_params = cfg.parse_config(
+            ModelControllerParameters,
+            prefix="service.model.controller",
+            hook_section="hooks",
+        )
 
     sys_trace: Optional[TracerParameters] = None
     sys_log: Optional[LoggingParameters] = None
 
-    if cfg.exists("trace"):
-        sys_trace = cfg.parse_config(TracerParameters, prefix="trace")
-    if cfg.exists("log"):
-        sys_log = cfg.parse_config(LoggingParameters, prefix="log")
+    with startup_profiler.stage("parse_global_trace_log"):
+        if cfg.exists("trace"):
+            sys_trace = cfg.parse_config(TracerParameters, prefix="trace")
+        if cfg.exists("log"):
+            sys_log = cfg.parse_config(LoggingParameters, prefix="log")
 
     log_config = controller_params.log or sys_log or LoggingParameters()
     trace_config = controller_params.trace or sys_trace or TracerParameters()
 
-    setup_logging(
-        "dbgpt",
-        log_config=log_config,
-        default_logger_filename=os.path.join(LOGDIR, "dbgpt_model_controller.log"),
-    )
+    with startup_profiler.stage("setup_logging"):
+        setup_logging(
+            "dbgpt",
+            log_config=log_config,
+            default_logger_filename=os.path.join(LOGDIR, "dbgpt_model_controller.log"),
+        )
 
-    registry = _create_registry(controller_params)
+    with startup_profiler.stage("create_registry"):
+        registry = _create_registry(controller_params)
 
-    initialize_controller(
-        registry=registry,
-        controller_params=controller_params,
-        trace_config=trace_config,
-    )
+    with startup_profiler.stage("initialize_controller"):
+        initialize_controller(
+            registry=registry,
+            controller_params=controller_params,
+            trace_config=trace_config,
+            startup_profiler=startup_profiler,
+        )
 
 
 if __name__ == "__main__":
