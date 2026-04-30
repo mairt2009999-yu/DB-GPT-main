@@ -1,3 +1,11 @@
+---
+name: sql-data-analyzer
+description: Analyze SQL databases, execute queries, and generate comprehensive HTML reports with insights.
+version: 1.0.0
+author: System
+skill_type: data_analysis
+tags: ["sql", "database", "analysis"]
+---
 # SQL Data Analyzer Skill
 
 ## Description

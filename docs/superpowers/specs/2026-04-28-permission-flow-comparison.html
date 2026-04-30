@@ -1,0 +1,953 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>DB-GPT Chat-BI 权限改造前后流程对比</title>
+  <style>
+    :root {
+      --bg: #fafaf7;
+      --ink: #222;
+      --ink-soft: #555;
+      --line: #888;
+      --gray-bg: #f3f3f0;
+      --gray-border: #b9b9b3;
+      --new-bg: #e7f7ec;
+      --new-border: #2e8b57;
+      --new-text: #1f6b41;
+      --change-bg: #fff4e0;
+      --change-border: #d97a14;
+      --change-text: #a3580d;
+      --note-bg: #fffbe6;
+      --note-border: #e0c244;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px 24px 64px;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+        "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    h1 { text-align: center; margin: 0 0 8px; font-size: 24px; }
+    .subtitle {
+      text-align: center;
+      color: var(--ink-soft);
+      margin-bottom: 24px;
+      font-size: 14px;
+    }
+    .legend {
+      display: flex;
+      gap: 18px;
+      justify-content: center;
+      margin-bottom: 32px;
+      flex-wrap: wrap;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--ink-soft);
+    }
+    .swatch {
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      border: 2px solid;
+    }
+    .swatch.gray   { background: var(--gray-bg);   border-color: var(--gray-border); }
+    .swatch.new    { background: var(--new-bg);    border-color: var(--new-border); }
+    .swatch.change { background: var(--change-bg); border-color: var(--change-border); }
+
+    .columns {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 48px;
+      max-width: 1280px;
+      margin: 0 auto;
+    }
+    @media (max-width: 900px) {
+      .columns { grid-template-columns: 1fr; }
+    }
+    .col {
+      background: #fff;
+      border: 1px solid #d9d9d4;
+      border-radius: 12px;
+      padding: 24px 20px 32px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+    }
+    .col h2 {
+      text-align: center;
+      margin: 0 0 18px;
+      font-size: 18px;
+      letter-spacing: 0.5px;
+    }
+    .col.before h2 { color: #555; }
+    .col.after  h2 { color: var(--new-text); }
+
+    .flow {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+    }
+    .step {
+      width: 88%;
+      padding: 12px 16px;
+      border: 2px solid var(--gray-border);
+      background: var(--gray-bg);
+      border-radius: 10px;
+      text-align: center;
+      font-size: 14px;
+      line-height: 1.5;
+      color: var(--ink);
+      position: relative;
+    }
+    .step.new {
+      background: var(--new-bg);
+      border-color: var(--new-border);
+      color: var(--new-text);
+      font-weight: 600;
+    }
+    .step.change {
+      background: var(--change-bg);
+      border-color: var(--change-border);
+      color: var(--change-text);
+      font-weight: 600;
+    }
+    .step .badge {
+      position: absolute;
+      top: -10px;
+      right: -10px;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+    .step.new .badge {
+      background: var(--new-border);
+      color: #fff;
+    }
+    .step.change .badge {
+      background: var(--change-border);
+      color: #fff;
+    }
+    .step .sub {
+      display: block;
+      margin-top: 4px;
+      font-size: 12px;
+      font-weight: normal;
+      color: inherit;
+      opacity: 0.85;
+    }
+    .arrow {
+      width: 0;
+      height: 0;
+      border-left: 8px solid transparent;
+      border-right: 8px solid transparent;
+      border-top: 12px solid var(--line);
+      margin: 6px 0;
+    }
+    .col.before .arrow { border-top-color: #aaa; }
+    .col.after  .arrow { border-top-color: #6c8da3; }
+
+    .note {
+      margin-top: 28px;
+      padding: 12px 14px;
+      background: var(--note-bg);
+      border: 1px dashed var(--note-border);
+      border-radius: 8px;
+      font-size: 12.5px;
+      color: #6b5810;
+      line-height: 1.6;
+    }
+    .note b { color: #4a3c08; }
+
+    /* 把入口/出口画得轻一点，类似原图的开始/结束 */
+    .step.terminal {
+      background: #fff;
+      border-style: dashed;
+      color: var(--ink-soft);
+      font-style: italic;
+    }
+
+    /* ========= RLSAwareSQLExecutor 容器 ========= */
+    .executor-box {
+      width: 92%;
+      margin: 0 auto;
+      border: 2.5px solid var(--new-border);
+      border-radius: 12px;
+      background: #f0faf4;
+      padding: 18px 10px 14px;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+    }
+    .executor-label {
+      position: absolute;
+      top: -14px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--new-border);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 3px 16px;
+      border-radius: 999px;
+      white-space: nowrap;
+      letter-spacing: 0.4px;
+      box-shadow: 0 2px 6px rgba(46,139,87,0.25);
+    }
+    .executor-title {
+      width: 100%;
+      text-align: center;
+      margin-bottom: 10px;
+      padding: 0 4px;
+    }
+    .executor-title .zh {
+      display: block;
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--new-text);
+      margin-bottom: 3px;
+    }
+    .executor-title .desc {
+      display: block;
+      font-size: 12px;
+      color: #3a7a55;
+      font-weight: normal;
+      line-height: 1.6;
+    }
+    .executor-divider {
+      width: 90%;
+      height: 1px;
+      background: #b2dfc4;
+      margin: 8px 0 10px;
+    }
+    .executor-box .step {
+      width: 94%;
+      font-size: 13px;
+      padding: 9px 12px;
+    }
+    .executor-box .arrow {
+      margin: 4px 0;
+      border-top-color: var(--new-border) !important;
+      opacity: 0.6;
+    }
+    .executor-mode {
+      margin-top: 10px;
+      font-size: 11px;
+      color: #2a7a4f;
+      text-align: center;
+      line-height: 1.8;
+      padding: 0 4px;
+    }
+    .executor-mode code {
+      background: #c8edd8;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-family: monospace;
+      font-size: 11px;
+    }
+
+    /* ========= 总体架构图 ========= */
+    .arch-section {
+      max-width: 960px;
+      margin: 0 auto 48px;
+    }
+    .arch-section h2 {
+      text-align: center;
+      font-size: 18px;
+      color: var(--ink);
+      margin: 0 0 20px;
+      letter-spacing: 0.5px;
+    }
+    .arch-gateway {
+      background: #e8f0f8;
+      border: 2px solid #6a90b8;
+      border-radius: 10px;
+      padding: 12px 20px;
+      text-align: center;
+      font-size: 14px;
+      font-weight: 600;
+      color: #1e4a72;
+    }
+    .arch-gateway .arch-sub {
+      display: block;
+      font-size: 12px;
+      font-weight: normal;
+      color: #3a6a9a;
+      margin-top: 3px;
+    }
+    .arch-arrow {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin: 4px 0;
+      gap: 0;
+    }
+    .arch-arrow-line {
+      width: 2px;
+      height: 16px;
+      background: #888;
+    }
+    .arch-arrow-head {
+      width: 0;
+      height: 0;
+      border-left: 8px solid transparent;
+      border-right: 8px solid transparent;
+      border-top: 12px solid #888;
+    }
+    .arch-dbgpt {
+      border: 2.5px solid #2e8b57;
+      border-radius: 12px;
+      background: #fff;
+      padding: 20px 16px 16px;
+      position: relative;
+    }
+    .arch-dbgpt-label {
+      position: absolute;
+      top: -14px;
+      left: 20px;
+      background: #2e8b57;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 2px 14px;
+      border-radius: 999px;
+      letter-spacing: 0.4px;
+    }
+    .arch-layers {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      align-items: stretch;
+    }
+    .arch-layer {
+      display: grid;
+      grid-template-columns: 200px 1fr;
+      gap: 0;
+      overflow: hidden;
+      border-left: 1.5px solid #d0d0ca;
+      border-right: 1.5px solid #d0d0ca;
+      background: #fff;
+    }
+    .arch-layer:first-child {
+      border-top: 1.5px solid #d0d0ca;
+      border-top-left-radius: 8px;
+      border-top-right-radius: 8px;
+    }
+    .arch-layer:last-child {
+      border-bottom: 1.5px solid #d0d0ca;
+      border-bottom-left-radius: 8px;
+      border-bottom-right-radius: 8px;
+    }
+    .arch-layer-tag {
+      padding: 14px 12px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      font-weight: 700;
+      font-size: 14px;
+      border-right: 1.5px solid #d0d0ca;
+    }
+    .arch-layer-tag .tag-code {
+      font-size: 11px;
+      font-family: monospace;
+      font-weight: normal;
+      margin-top: 3px;
+      opacity: 0.8;
+    }
+    .arch-layer-body {
+      padding: 12px 14px;
+      font-size: 13px;
+      line-height: 1.7;
+      color: var(--ink);
+      background: #fff;
+    }
+    .arch-layer-body .body-title {
+      font-weight: 700;
+      font-size: 13.5px;
+      margin-bottom: 2px;
+    }
+    .arch-layer-body .body-detail {
+      color: #555;
+      font-size: 12.5px;
+    }
+    .arch-layer-body .fail {
+      display: inline-block;
+      margin-top: 4px;
+      background: #fee;
+      border: 1px solid #e88;
+      border-radius: 4px;
+      font-size: 11.5px;
+      padding: 1px 8px;
+      color: #b33;
+      font-weight: 600;
+    }
+    .arch-layer.l1 .arch-layer-tag { background: #e8f0f8; color: #1e4a72; }
+    .arch-layer.l1 { border-color: #6a90b8; }
+    .arch-layer.l2 .arch-layer-tag { background: #fff4e0; color: #8a4d0a; }
+    .arch-layer.l2 { border-color: #d97a14; }
+    .arch-layer.l3 .arch-layer-tag { background: #e7f7ec; color: #1f6b41; }
+    .arch-layer.l3 { border-color: #2e8b57; }
+    .arch-layer.task .arch-layer-tag { background: #f3f0ff; color: #4a2a8a; }
+    .arch-layer.task { border-color: #9b72d4; }
+    .arch-inner-arrow {
+      display: flex;
+      justify-content: flex-start;
+      padding-left: 100px;
+      margin: 0;
+    }
+    .arch-inner-arrow-icon {
+      width: 0;
+      height: 0;
+      border-left: 6px solid transparent;
+      border-right: 6px solid transparent;
+      border-top: 9px solid #bbb;
+      margin: 3px 0;
+    }
+
+    /* ========= 资源权限设计细节 ========= */
+    .resource-section {
+      max-width: 1180px;
+      margin: 56px auto 0;
+    }
+    .resource-section h2 {
+      text-align: center;
+      font-size: 18px;
+      color: var(--ink);
+      margin: 0 0 20px;
+      letter-spacing: 0.4px;
+    }
+    .resource-intro {
+      max-width: 980px;
+      margin: 0 auto 24px;
+      background: #fff;
+      border: 1px solid #e2e0d8;
+      border-radius: 10px;
+      padding: 14px 16px;
+      color: #555;
+      font-size: 13px;
+      line-height: 1.8;
+    }
+    .resource-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    @media (max-width: 980px) {
+      .resource-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .resource-card {
+      background: #fff;
+      border: 1px solid #ddd9ce;
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.03);
+    }
+    .resource-card h3 {
+      margin: 0 0 10px;
+      font-size: 15px;
+      color: #8a4d0a;
+    }
+    .resource-card p,
+    .resource-card li {
+      font-size: 12.5px;
+      color: #555;
+      line-height: 1.8;
+    }
+    .resource-card ul {
+      margin: 8px 0 0 18px;
+      padding: 0;
+    }
+    .resource-box {
+      background: #fff;
+      border: 1px solid #ddd9ce;
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 18px;
+    }
+    .resource-box h3 {
+      margin: 0 0 12px;
+      font-size: 15px;
+      color: #8a4d0a;
+    }
+    .perm-matrix {
+      display: grid;
+      grid-template-columns: 170px 1fr 1fr;
+      border: 1px solid #ddd9ce;
+      border-radius: 10px;
+      overflow: hidden;
+      margin-top: 10px;
+    }
+    @media (max-width: 980px) {
+      .perm-matrix {
+        grid-template-columns: 1fr;
+      }
+    }
+    .perm-cell {
+      padding: 12px 14px;
+      border-right: 1px solid #e5e2d9;
+      border-bottom: 1px solid #e5e2d9;
+      font-size: 12.5px;
+      line-height: 1.75;
+      background: #fff;
+      color: #555;
+    }
+    .perm-cell.head {
+      background: #fff4e0;
+      font-weight: 700;
+      color: #8a4d0a;
+    }
+    .perm-cell.side {
+      background: #faf8f2;
+      font-weight: 700;
+      color: #444;
+    }
+    .perm-cell:last-child,
+    .perm-matrix .perm-cell:nth-child(3n) {
+      border-right: none;
+    }
+    .perm-matrix .perm-cell:nth-last-child(-n+3) {
+      border-bottom: none;
+    }
+    .resource-highlight {
+      display: inline-block;
+      background: #fff4e0;
+      border: 1px solid #f0c78a;
+      color: #8a4d0a;
+      border-radius: 999px;
+      padding: 1px 8px;
+      font-size: 11.5px;
+      font-weight: 700;
+      margin-right: 6px;
+    }
+    .resource-flow {
+      background: #f8fbff;
+      border: 1px dashed #90afc8;
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 12.5px;
+      line-height: 1.9;
+      color: #4f5f70;
+      white-space: normal;
+    }
+  </style>
+</head>
+<body>
+  <h1>DB-GPT Chat-BI 权限体系设计</h1>
+  <div class="subtitle">总体分层架构 · 改造前后流程对比</div>
+
+  <div class="arch-section">
+    <h2>一、总体架构：三层鉴权 + 一处任务建模</h2>
+
+    <div class="arch-gateway">
+      上游网关 / BFF
+      <span class="arch-sub">认证已完成 · 注入身份头：X-User-Id / Authorization</span>
+    </div>
+
+    <div class="arch-arrow">
+      <div class="arch-arrow-line"></div>
+      <div class="arch-arrow-head"></div>
+    </div>
+
+    <div class="arch-dbgpt">
+      <span class="arch-dbgpt-label">DB-GPT FastAPI</span>
+
+      <div class="arch-layers">
+        <div class="arch-layer l1">
+          <div class="arch-layer-tag">
+            L1
+            <span class="tag-code">身份解析</span>
+          </div>
+          <div class="arch-layer-body">
+            <div class="body-title">把请求头解析为可信的用户身份（Principal）</div>
+            <div class="body-detail">
+              读取网关注入的 <code>X-User-Id</code>。<br/>
+              <b>roles 不在请求头里</b>——需要判断权限时，L1 按需调用外部 User 服务拉取该用户的角色列表，避免每次请求都拉取。<br/>
+              拉取结果缓存在本地（短 TTL），减少对外部服务的依赖。<br/>
+              <b>DB-GPT 管理员</b>不是请求头标记，而是通过“现有系统中的特定角色编码”映射得出。<br/>
+              输出：<code>Principal { user_id, roles, is_admin }</code>
+            </div>
+            <span class="fail">缺少必填头 → 401 未授权</span>
+          </div>
+        </div>
+
+        <div class="arch-inner-arrow"><div class="arch-inner-arrow-icon"></div></div>
+
+        <div class="arch-layer l2">
+          <div class="arch-layer-tag">
+            L2
+            <span class="tag-code">资源隔离</span>
+          </div>
+          <div class="arch-layer-body">
+            <div class="body-title">控制用户能看到哪些 DB-GPT 内部资源</div>
+            <div class="body-detail">
+              资源包括：GptsApp（AI 应用）、数据源、会话、Prompt 模板、Flow 等。<br/>
+              规则：普通用户只能看自己创建的资源；DB-GPT 管理员可看全部资源；已发布的 App 对所有用户可见。<br/>
+              实现方式：所有列表/查询接口自动追加 <code>WHERE owner=me</code>；编辑/删除前验证是否为创建者。
+            </div>
+            <span class="fail">越权访问 → 403 禁止</span>
+          </div>
+        </div>
+
+        <div class="arch-inner-arrow"><div class="arch-inner-arrow-icon"></div></div>
+
+        <div class="arch-layer l3">
+          <div class="arch-layer-tag">
+            L3
+            <span class="tag-code">行级 RLS</span>
+          </div>
+          <div class="arch-layer-body">
+            <div class="body-title">控制用户在目标数据库里能看到哪些行</div>
+            <div class="body-detail">
+              LLM 生成 SQL 后，系统强制拦截，在 SQL 真正发给数据库之前：<br/>
+              ① 解析 SQL 里涉及的所有表；<br/>
+              ② 向上游权限服务查询「当前用户 × 每张表」的可见范围（返回 WHERE 条件片段）；<br/>
+              ③ 把条件片段注入 SQL 对应位置（AST 改写，非字符串拼接）；<br/>
+              ④ 执行改写后的 SQL。<br/>
+              用户感知不到这个过程，LLM 不参与，任何路径无法绕过。
+            </div>
+            <span class="fail">无权限或服务不可用 → fail-close 拒绝执行</span>
+          </div>
+        </div>
+
+        <div class="arch-inner-arrow"><div class="arch-inner-arrow-icon"></div></div>
+
+        <div class="arch-layer task">
+          <div class="arch-layer-tag">
+            任务建模
+            <span class="tag-code">审计记录</span>
+          </div>
+          <div class="arch-layer-body">
+            <div class="body-title">记录每次分析的执行过程，支持合规审计和问题复盘</div>
+            <div class="body-detail">
+              每次用户发起数据分析，在 <code>gpts_conversations</code> 表写入：<br/>
+              · <b>task_status</b>：执行状态（等待中 / 运行中 / 成功 / 失败 / 已取消）<br/>
+              · <b>executed_sql</b>：实际打到数据库的 SQL（含权限改写后的版本）<br/>
+              · <b>rls_snapshot</b>：执行时刻使用的权限谓词快照（便于事后解释“当时为什么能/不能看到某条数据”）<br/>
+              这些字段仅供审计，不影响用户功能。
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <hr style="border:none;border-top:1px solid #e0e0da;max-width:960px;margin:0 auto 40px;"/>
+  <h2 style="text-align:center;font-size:18px;color:var(--ink);margin:0 0 20px;">二、改造前后流程对比</h2>
+  <div class="subtitle" style="margin-top:-12px;">绿色 = 新增步骤；橙色 = 改造步骤；灰色 = 不变</div>
+
+  <div class="legend">
+    <div class="legend-item"><span class="swatch gray"></span>未变（沿用现有逻辑）</div>
+    <div class="legend-item"><span class="swatch new"></span>新增步骤</div>
+    <div class="legend-item"><span class="swatch change"></span>改造步骤</div>
+  </div>
+
+  <div class="columns">
+    <!-- ============ 加权限前 ============ -->
+    <div class="col before">
+      <h2>加权限前 · 现状</h2>
+      <div class="flow">
+        <div class="step terminal">用户在前端发起问数</div>
+        <div class="arrow"></div>
+
+        <div class="step">
+          加载 Skill / GptsApp 配置
+          <span class="sub">查表不带 owner 过滤</span>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step">
+          加载知识库
+          <span class="sub">全量元数据</span>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step">
+          加载数据源 / DB Schema
+          <span class="sub">connect_config 全量</span>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step">
+          构造 Prompt
+          <span class="sub">问题 + Schema + 业务术语</span>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step">
+          模型联合 ReAct 推理
+          <span class="sub">生成 SQL</span>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step">
+          执行 SQL（直接打到 DB）
+          <span class="sub">无任何过滤</span>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step">
+          渲染结果 / 输出 HTML
+          <span class="sub">图表 / 报表</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 加权限后 ============ -->
+    <div class="col after">
+      <h2>加权限后 · 改造方案</h2>
+      <div class="flow">
+        <div class="step terminal">用户在前端发起问数（带身份头）</div>
+        <div class="arrow"></div>
+
+        <div class="step new">
+          L1 解析身份 → Principal
+          <span class="sub">X-User-Id；roles 按需调 User 服务获取并缓存；特定角色编码映射为 DB-GPT 管理员</span>
+          <span class="badge">新增</span>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step change">
+          加载 Skill / GptsApp 配置
+          <span class="sub">+ owner 过滤；published 可见；DB-GPT 管理员可跨 owner 查看</span>
+          <span class="badge">改造</span>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step">
+          加载知识库
+          <span class="sub">根据问题召回相关知识</span>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step change">
+          加载数据源 / DB Schema
+          <span class="sub">+ 根据问题召回相关表；如配置表权限，则先获取表权限列表后过滤</span>
+          <span class="badge">改造</span>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step change">
+          构造 Prompt
+          <span class="sub">+ 注入 Principal 与可见表/列范围；告知模型权限将由后端强制改写</span>
+          <span class="badge">改造</span>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step change">
+          模型联合 ReAct 推理
+          <span class="sub">生成 SQL（在已知可见范围内尽量贴合，提升通过率）</span>
+          <span class="badge">改造</span>
+        </div>
+        <div class="arrow"></div>
+
+        <!-- ===== RLSAwareSQLExecutor 统一执行器 ===== -->
+        <div class="executor-box">
+          <span class="executor-label">RLSAwareSQLExecutor.execute()</span>
+
+          <div class="executor-title">
+            <span class="zh">后端拦截 · SQL 权限强制改写</span>
+            <span class="desc">
+              LLM 生成的 SQL 到达这里后，<b>不会直接发给数据库</b>。<br/>
+              系统会先查出当前用户对每张表的可见范围（例如“只能看华南区数据”），<br/>
+              再把这个限制条件<b>强制拼进 SQL</b>，最后才执行。<br/>
+              这是一个后台自动过程，用户不感知、LLM 不参与、任何人无法绕过。
+            </span>
+          </div>
+          <div class="executor-divider"></div>
+
+          <div class="step new">
+            ① sqlglot 解析 SQL → 收集涉及的所有表
+            <span class="sub">覆盖 JOIN / 子查询 / CTE / UNION / 自连接</span>
+            <span class="badge">新增</span>
+          </div>
+          <div class="arrow"></div>
+
+          <div class="step new">
+            ② RLSClient.batch_fetch → 调上游权限服务
+            <span class="sub">命中 LRU/Redis 缓存直接返回；allowed=false 则整条拒绝</span>
+            <span class="badge">新增</span>
+          </div>
+          <div class="arrow"></div>
+
+          <div class="step new">
+            ③ AST 谓词注入
+            <span class="sub">主表/INNER JOIN → WHERE；LEFT JOIN 右表 → ON；不依赖 LLM</span>
+            <span class="badge">新增</span>
+          </div>
+          <div class="arrow"></div>
+
+          <div class="step change">
+            ④ 执行改写后 SQL
+            <span class="sub">fail-close；上游不可用时 stale 缓存兜底</span>
+            <span class="badge">改造</span>
+          </div>
+          <div class="arrow"></div>
+
+          <div class="step new">
+            ⑤ 审计落库
+            <span class="sub">executed_sql + rls_snapshot → gpts_conversations</span>
+            <span class="badge">新增</span>
+          </div>
+
+          <div class="executor-mode">
+            rls_mode：<code>off</code> 跳过改写 &nbsp;|&nbsp;
+            <code>shadow</code> 改写但执行原 SQL（灰度验证）&nbsp;|&nbsp;
+            <code>enforce</code> 强制执行改写后 SQL
+          </div>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="step">
+          渲染结果 / 输出 HTML
+          <span class="sub">图表 / 报表</span>
+        </div>
+      </div>
+
+      <div class="note">
+        <b>关键变化总览：</b><br/>
+        ① 入口处先解析身份 Principal（取代原来的 mock user）；<br/>
+        ② 资源加载（Skill / 数据源）按 owner 过滤；管理员角色可放宽跨 owner 查看；<br/>
+        ③ Prompt / ReAct 改造：把用户身份与可见表/列写入 system prompt，<b>仅用于提升 SQL 通过率，不是安全底线</b>；<br/>
+        ④ 模型生成 SQL 后，统一进入 <b>RLSAwareSQLExecutor</b>：调上游谓词接口 + sqlglot AST 改写，<b>不依赖 LLM 自觉调用</b>（LLM 可能被 prompt 注入或偷懒跳过）；<br/>
+        ⑤ 执行后写入 executed_sql / rls_snapshot 审计快照，便于事后复盘。
+        <br/><br/>
+        <b>为什么不让 Agent 自己调谓词接口（ReAct 工具调用方式）？</b><br/>
+        · LLM 可能被 prompt 注入，跳过工具直接返回原 SQL；<br/>
+        · LLM 自己拼谓词到 SQL 里，对 LEFT JOIN / 聚合 / CTE 边界处理不可靠；<br/>
+        · 安全决策必须发生在不可被 LLM 绕过的链路上 → 放在后端 Executor 层。
+      </div>
+    </div>
+  </div>
+
+  <div class="resource-section">
+    <h2>三、资源权限设计细节（L2 资源隔离）</h2>
+
+    <div class="resource-intro">
+      这一层解决的不是“数据库里哪些数据行可见”，而是“用户能不能看到/修改 DB-GPT 自己的资源”。<br/>
+      例如：能不能看到某个 GptsApp、能不能使用某个数据源、能不能打开别人的会话记录。<br/>
+      初版采用 <b>owner + 管理员角色放宽</b> 的简单模型，不做完整 RBAC；管理员身份来自现有系统中的特定角色编码。
+    </div>
+
+    <div class="resource-grid">
+      <div class="resource-card">
+        <h3>1. 参与判定的身份信息</h3>
+        <ul>
+          <li><b>user_id</b>：当前登录用户 ID</li>
+          <li><b>roles</b>：不在请求头里；需要时调用 User 服务获取并缓存</li>
+          <li><b>is_admin</b>：由现有系统中的特定角色编码映射得到，用于放宽“跨 owner 查看”的限制</li>
+        </ul>
+      </div>
+
+      <div class="resource-card">
+        <h3>2. 当前纳入控制的资源</h3>
+        <ul>
+          <li><b>GptsApp</b>：AI 应用 / 助手</li>
+          <li><b>Datasource</b>：数据源连接配置</li>
+          <li><b>Conversation</b>：会话与任务记录</li>
+          <li><b>Prompt / Flow</b>：提示词模板、工作流配置</li>
+          <li><b>File / dbgpts</b>：文件、插件等资源</li>
+        </ul>
+      </div>
+
+      <div class="resource-card">
+        <h3>3. 设计原则</h3>
+        <ul>
+          <li><b>同用户归属</b>：普通用户默认只能看自己创建的资源</li>
+          <li><b>管理员放宽</b>：拥有指定角色编码的管理员可看全部资源</li>
+          <li><b>公开例外</b>：仅 GptsApp 支持 published，对所有用户可见</li>
+          <li><b>接口收口</b>：不靠前端隐藏按钮，后端接口强制校验</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="resource-box">
+      <h3>资源权限判定矩阵</h3>
+      <div class="perm-matrix">
+        <div class="perm-cell head">操作类型</div>
+        <div class="perm-cell head">普通用户</div>
+        <div class="perm-cell head">管理员（特定角色编码）</div>
+
+        <div class="perm-cell side">列表 / 查询</div>
+        <div class="perm-cell">
+          默认只看自己的资源：<br/>
+          <code>WHERE owner_user_id = current_user</code><br/>
+          <span class="resource-highlight">GptsApp 例外</span>
+          若 <code>published = true</code>，则其他用户也可见。
+        </div>
+        <div class="perm-cell">
+          可看全部资源：<br/>
+          不受 owner 限制，但管理员身份必须由现有系统角色编码映射确认。
+        </div>
+
+        <div class="perm-cell side">详情 / 打开</div>
+        <div class="perm-cell">
+          必须满足：<br/>
+          ① 资源 owner = 当前用户；或<br/>
+          ② GptsApp 且 published = true。
+        </div>
+        <div class="perm-cell">
+          只要具有 DB-GPT 管理员角色即可打开任意资源。<br/>
+          不再依赖租户字段判断。
+        </div>
+
+        <div class="perm-cell side">编辑 / 删除</div>
+        <div class="perm-cell">
+          必须同时满足：<br/>
+          <code>owner_user_id = current_user</code><br/>
+          否则返回 403。
+        </div>
+        <div class="perm-cell">
+          可编辑 / 删除任意资源。<br/>
+          用于管理员代运维、资源纠偏、异常清理。
+        </div>
+
+        <div class="perm-cell side">失败返回</div>
+        <div class="perm-cell">不满足资源权限 → 403 Forbidden</div>
+        <div class="perm-cell">无管理员角色 → 403 Forbidden</div>
+      </div>
+    </div>
+
+    <div class="resource-box">
+      <h3>后端实现方式（不依赖前端）</h3>
+      <div class="resource-flow">
+        请求进入接口<br/>
+        → L1 先得到 Principal（user_id / roles）<br/>
+        → L2 在 DAO / Service 层自动追加 owner 过滤条件<br/>
+        → 查询结果返回给业务层<br/>
+        → 若是编辑 / 删除动作，则额外执行 <b>assert_owner</b> 断言<br/>
+        → 不满足条件时直接返回 403，不依赖前端“是否隐藏按钮”
+      </div>
+    </div>
+
+    <div class="resource-box">
+      <h3>代码侧建议落点</h3>
+      <div style="font-size:12.5px;line-height:1.9;color:#555;">
+        <span class="resource-highlight">统一工具函数</span>
+        在 <code>packages/dbgpt-serve/src/dbgpt_serve/utils/authz.py</code> 中提供：<br/>
+        · <code>with_owner_filter(query, model_cls, principal)</code>：自动追加 owner 条件<br/>
+        · <code>assert_owner(entity, principal, allow_admin=True)</code>：编辑 / 删除前断言<br/>
+        · <code>has_dbgpt_admin_role(principal)</code>：根据现有系统角色编码判断是否为 DB-GPT 管理员<br/><br/>
+
+        <span class="resource-highlight">优先改造接口</span>
+        <code>agent/app/controller.py</code>、<code>datasource/api/endpoints.py</code>、<code>conversation/api/endpoints.py</code>、<code>flow/api/endpoints.py</code>、<code>prompt/api/endpoints.py</code><br/><br/>
+
+        <span class="resource-highlight">当前最重要的问题</span>
+        现状里有些列表接口直接把用户过滤关掉了（例如 <code>ignore_user = true</code>），改造时要优先收口这些裸奔逻辑。
+      </div>
+    </div>
+  </div>
+</body>
+</html>
