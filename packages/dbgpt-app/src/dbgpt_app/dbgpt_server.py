@@ -39,6 +39,8 @@ from dbgpt_app.base import (
 # initialize_components import time cost about 0.1s
 from dbgpt_app.component_configs import initialize_components
 from dbgpt_app.config import ApplicationConfig, ServiceWebParameters, SystemParameters
+from dbgpt_app.microservice.health import mount_health_routes
+from dbgpt_app.microservice.middleware import ContextMiddleware
 from dbgpt_serve.core import add_exception_handler
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,7 @@ app = create_app(
 replace_router(app)
 
 system_app = SystemApp(app)
+app.state.dbgpt_system_app = system_app
 
 
 def _stage(startup_profiler: Optional[StartupProfiler], name: str):
@@ -172,6 +175,10 @@ def initialize_app(
 
     with _stage(startup_profiler, "server_init"):
         server_init(param, system_app)
+    with _stage(startup_profiler, "mount_context_middleware"):
+        _mount_context_middleware(app)
+    with _stage(startup_profiler, "mount_health_routes"):
+        mount_health_routes(app, version=version)
     with _stage(startup_profiler, "mount_routers"):
         mount_routers(app)
     model_start_listener = _create_model_start_listener(system_app)
@@ -279,6 +286,12 @@ def initialize_app(
     with _stage(startup_profiler, "system_app_before_start"):
         system_app.before_start()
     return param
+
+
+def _mount_context_middleware(app: FastAPI):
+    middleware_classes = [middleware.cls for middleware in app.user_middleware]
+    if ContextMiddleware not in middleware_classes:
+        app.add_middleware(ContextMiddleware)
 
 
 def run_uvicorn(

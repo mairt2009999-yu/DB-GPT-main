@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.types import ASGIApp
+from starlette.responses import JSONResponse
+
+from dbgpt_app.microservice.context import (
+    RequestContext,
+    reset_current_resolved_principal,
+    reset_current_request_context,
+    set_current_resolved_principal,
+    set_current_request_context,
+)
+
+
+def _split_roles(raw_roles: str | None) -> list[str]:
+    if not raw_roles:
+        return []
+    return [role.strip() for role in raw_roles.split(",") if role.strip()]
+
+
+class ContextMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app: ASGIApp):
+        super().__init__(app)
+
+    async def dispatch(self, request: Request, call_next):
+        request_context = RequestContext(
+            authorization=request.headers.get("Authorization"),
+            user_id=request.headers.get("X-User-Id"),
+            tenant_id=request.headers.get("X-Tenant-Id"),
+            request_id=request.headers.get("X-Request-Id"),
+            roles=_split_roles(request.headers.get("X-Roles")),
+            sys_code=request.headers.get("X-System-Code"),
+        )
+        request.state.request_context = request_context
+        token = set_current_request_context(request_context)
+        try:
+            if request.url.path.startswith("/api") and (
+                request_context.user_id or request_context.authorization
+            ):
+                response = await self._resolve_principal(request, request_context)
+                if response is not None:
+                    return response
+            response = await call_next(request)
+        finally:
+            resolved_token = getattr(request.state, "_resolved_principal_token", None)
+            if resolved_token is not None:
+                reset_current_resolved_principal(resolved_token)
+            reset_current_request_context(token)
+        return response
+
+    async def _resolve_principal(
+        self, request: Request, request_context: RequestContext
+    ):
+        system_app = getattr(request.app.state, "dbgpt_system_app", None)
+        if not system_app:
+            return None
+        app_config = system_app.config.configs.get("app_config")
+        if not app_config or not app_config.service.web.nacos.enabled:
+            return None
+        from dbgpt_app.microservice.user_service import (
+            AuthenticationFailedError,
+            AuthorizationFailedError,
+            ServiceUnavailableError,
+            UserServiceClient,
+        )
+
+        user_service_client = UserServiceClient.get_instance(system_app)
+        try:
+            resolved_principal = await user_service_client.resolve_principal(
+                request_context
+            )
+        except AuthenticationFailedError as exc:
+            return JSONResponse(status_code=401, content={"detail": str(exc)})
+        except AuthorizationFailedError as exc:
+            return JSONResponse(status_code=403, content={"detail": str(exc)})
+        except ServiceUnavailableError as exc:
+            return JSONResponse(status_code=503, content={"detail": str(exc)})
+        request.state.resolved_principal = resolved_principal
+        request_context.user_id = resolved_principal.profile.user_id
+        request_context.tenant_id = resolved_principal.profile.tenant_id
+        request_context.roles = list(resolved_principal.permissions.roles)
+        request_context.sys_code = resolved_principal.sys_code
+        token = set_current_resolved_principal(resolved_principal)
+        request.state._resolved_principal_token = token
+        return None

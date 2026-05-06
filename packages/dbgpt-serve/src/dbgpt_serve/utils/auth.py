@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import Header
 
 from dbgpt._private.pydantic import BaseModel
+from dbgpt_app.microservice.context import get_current_request_context
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +25,20 @@ class UserRequest(BaseModel):
 
 def get_user_from_headers(user_id: Optional[str] = Header(None)):
     try:
+        request_context = get_current_request_context()
+        resolved_user_id = request_context.user_id or user_id
+        resolved_sys_code = request_context.sys_code
+        resolved_roles = request_context.roles
         # Mock User Info
-        if user_id:
+        if resolved_user_id:
             return UserRequest(
-                user_id=user_id, role="admin", nick_name=user_id, real_name=user_id
+                user_id=resolved_user_id,
+                user_name=resolved_user_id,
+                user_no=resolved_user_id,
+                role=",".join(resolved_roles) if resolved_roles else "admin",
+                nick_name=resolved_user_id,
+                real_name=resolved_user_id,
+                user_channel=resolved_sys_code,
             )
         else:
             return UserRequest(

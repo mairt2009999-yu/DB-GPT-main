@@ -21,6 +21,10 @@ def initialize_components(
         _initialize_rerank_model,
     )
     from dbgpt_app.initialization.scheduler import DefaultScheduler
+    from dbgpt_app.microservice.discovery import ServiceDiscovery
+    from dbgpt_app.microservice.nacos import NacosNamingClient
+    from dbgpt_app.microservice.registration import ServiceRegistration
+    from dbgpt_app.microservice.user_service import UserServiceClient
     from dbgpt_app.initialization.serve_initialization import register_serve_apps
     from dbgpt_serve.datasource.manages.connector_manager import ConnectorManager
 
@@ -36,6 +40,10 @@ def initialize_components(
     system_app.register_instance(controller)
     system_app.register(ConnectorManager)
     system_app.register(StorageManager)
+    system_app.register(NacosNamingClient)
+    system_app.register(ServiceDiscovery)
+    system_app.register(ServiceRegistration)
+    system_app.register(UserServiceClient)
 
     from dbgpt_serve.agent.hub.controller import module_plugin
 

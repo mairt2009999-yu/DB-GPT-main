@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from dbgpt.datasource.parameter import BaseDatasourceParameters
 from dbgpt.model.parameter import (
@@ -315,6 +315,162 @@ class ServiceWebParameters(BaseParameters):
         metadata={
             "help": _("The max sequence length of the embedding model, default is 512")
         },
+    )
+    nacos: "NacosClientConfig" = field(
+        default_factory=lambda: NacosClientConfig(),
+        metadata={"help": _("Nacos naming integration config")},
+    )
+    remote_services: "RemoteServicesConfig" = field(
+        default_factory=lambda: RemoteServicesConfig(),
+        metadata={"help": _("Remote service integration config")},
+    )
+
+
+@dataclass
+class NacosClientConfig(BaseParameters):
+    enabled: bool = field(default=False, metadata={"help": _("Enable Nacos naming")})
+    service_name: str = field(
+        default="dbgpt-webserver",
+        metadata={"help": _("Service name registered in Nacos")},
+    )
+    server_addr: str = field(
+        default="127.0.0.1:8848",
+        metadata={"help": _("Nacos server address")},
+    )
+    namespace_id: Optional[str] = field(
+        default=None,
+        metadata={"help": _("Nacos namespace id")},
+    )
+    group_name: str = field(
+        default="DEFAULT_GROUP",
+        metadata={"help": _("Nacos group name")},
+    )
+    cluster_name: str = field(
+        default="DEFAULT",
+        metadata={"help": _("Nacos cluster name")},
+    )
+    ip: Optional[str] = field(
+        default=None,
+        metadata={"help": _("Registered service IP")},
+    )
+    port: Optional[int] = field(
+        default=None,
+        metadata={"help": _("Registered service port")},
+    )
+    ephemeral: bool = field(
+        default=True,
+        metadata={"help": _("Register as an ephemeral instance")},
+    )
+    metadata: Dict[str, str] = field(
+        default_factory=dict,
+        metadata={"help": _("Metadata attached to the Nacos instance")},
+    )
+    username: Optional[str] = field(
+        default=None,
+        metadata={"help": _("Nacos username")},
+    )
+    password: Optional[str] = field(
+        default=None,
+        metadata={"help": _("Nacos password")},
+    )
+    access_key: Optional[str] = field(
+        default=None,
+        metadata={"help": _("Nacos access key")},
+    )
+    secret_key: Optional[str] = field(
+        default=None,
+        metadata={"help": _("Nacos secret key")},
+    )
+    healthy_check_path: str = field(
+        default="/api/health",
+        metadata={"help": _("Health check path exposed by DB-GPT")},
+    )
+    register_on_startup: bool = field(
+        default=True,
+        metadata={"help": _("Register the webserver on startup")},
+    )
+    timeout_ms: int = field(
+        default=3000,
+        metadata={"help": _("Nacos OpenAPI timeout in milliseconds")},
+    )
+    request_timeout_ms: int = field(
+        default=3000,
+        metadata={"help": _("Per-request timeout in milliseconds")},
+    )
+    max_retries: int = field(
+        default=1,
+        metadata={"help": _("Retry count for Nacos OpenAPI requests")},
+    )
+    prefer_sdk: bool = field(
+        default=True,
+        metadata={"help": _("Prefer nacos-sdk-python when available")},
+    )
+
+
+@dataclass
+class RemoteServiceConfig(BaseParameters):
+    service_name: str = field(
+        default="user-service",
+        metadata={"help": _("Remote service name")},
+    )
+    namespace_id: Optional[str] = field(
+        default=None,
+        metadata={"help": _("Override namespace id for the remote service")},
+    )
+    group_name: Optional[str] = field(
+        default=None,
+        metadata={"help": _("Override group name for the remote service")},
+    )
+    cluster_name: Optional[str] = field(
+        default=None,
+        metadata={"help": _("Override cluster name for the remote service")},
+    )
+    timeout_ms: int = field(
+        default=3000,
+        metadata={"help": _("Overall timeout in milliseconds")},
+    )
+    connect_timeout_ms: int = field(
+        default=500,
+        metadata={"help": _("Connect timeout in milliseconds")},
+    )
+    read_timeout_ms: int = field(
+        default=2500,
+        metadata={"help": _("Read timeout in milliseconds")},
+    )
+    retries: int = field(
+        default=1,
+        metadata={"help": _("Retry count for downstream service calls")},
+    )
+    load_balance: str = field(
+        default="random",
+        metadata={
+            "help": _("Load balance strategy"),
+            "valid_values": ["random", "round_robin"],
+        },
+    )
+    path_prefix: str = field(
+        default="/api/v1/users",
+        metadata={"help": _("Path prefix used when calling the remote service")},
+    )
+    cache_ttl_seconds: int = field(
+        default=5,
+        metadata={"help": _("Service instance cache TTL in seconds")},
+    )
+    profile_path: str = field(
+        default="/profile",
+        metadata={"help": _("Path used to fetch the user profile")},
+    )
+    permissions_path: str = field(
+        default="/permissions",
+        metadata={"help": _("Path used to fetch permissions when not in profile")},
+    )
+
+
+@dataclass
+class RemoteServicesConfig(BaseParameters):
+    user_service: RemoteServiceConfig = field(
+        default_factory=RemoteServiceConfig,
+        metadata={"help": _("user-service integration config")},
     )
 
 
