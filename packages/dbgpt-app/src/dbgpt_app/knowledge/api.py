@@ -35,6 +35,8 @@ from dbgpt_app.knowledge.request.response import (
     KnowledgeQueryResponse,
 )
 from dbgpt_app.knowledge.service import KnowledgeService
+from dbgpt_app.microservice.context import get_current_request_context
+from dbgpt_app.microservice.user_service import UserServiceClient
 from dbgpt_app.openapi.api_v1.api_v1 import (
     get_executor,
     no_stream_generator,
@@ -96,6 +98,7 @@ async def space_add(request: KnowledgeSpaceRequest):
 async def space_list(request: KnowledgeSpaceRequest):
     logger.info(f"/space/list params: {request}")
     try:
+        await _log_resource_sql_fragment()
         res = await blocking_func_to_async(
             get_executor(), knowledge_space_service.get_knowledge_space, request
         )
@@ -103,6 +106,36 @@ async def space_list(request: KnowledgeSpaceRequest):
     except Exception as e:
         logger.exception(f"Space list error!{str(e)}")
         return Result.failed(code="E000X", msg=f"space list error {e}")
+
+
+async def _log_resource_sql_fragment() -> None:
+    request_context = get_current_request_context()
+    if not request_context.user_id:
+        logger.info("Skip user-service SQL fragment lookup: missing X-User-Id")
+        return
+    try:
+        logger.info(
+            "Calling user-service SQL fragment: userId=%s tableCode=%s",
+            request_context.user_id,
+            "resource",
+        )
+        user_service_client = UserServiceClient.get_instance(CFG.SYSTEM_APP)
+        sql_fragment = await user_service_client.get_sql_fragment_by_user_id(
+            request_context, "resource"
+        )
+        logger.info(
+            "User service SQL fragment: userId=%s tableCode=%s sqlFragment=%s",
+            sql_fragment.user_id,
+            sql_fragment.table_code,
+            sql_fragment.sql_fragment,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch user-service SQL fragment: %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
 
 
 @router.post("/knowledge/space/delete")

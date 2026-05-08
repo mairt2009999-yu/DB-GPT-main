@@ -25,7 +25,9 @@ class ServiceRegistration(BaseComponent):
     async def async_after_start(self):
         if self.app_config.service.web.nacos.enabled:
             await self.naming_client.register_instance()
+            self.naming_client.start_heartbeat()
 
     async def async_before_stop(self):
         if self.app_config.service.web.nacos.enabled:
+            await self.naming_client.stop_heartbeat()
             await self.naming_client.deregister_instance()

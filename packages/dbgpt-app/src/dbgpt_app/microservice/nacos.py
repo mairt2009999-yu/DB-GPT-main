@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
+import logging
 import socket
 import time
 from typing import Any, Dict, List, Optional
@@ -13,6 +15,8 @@ import httpx
 from dbgpt.component import BaseComponent, SystemApp
 from dbgpt_app.config import ApplicationConfig, NacosClientConfig
 from dbgpt_app.microservice.discovery import ServiceInstance
+
+logger = logging.getLogger(__name__)
 
 
 class NacosNamingError(RuntimeError):
@@ -30,6 +34,7 @@ class NacosNamingClient(BaseComponent):
         self._client_factory = client_factory or self._default_client_factory
         self._access_token: Optional[str] = None
         self._access_token_expires_at = 0.0
+        self._heartbeat_task: Optional[asyncio.Task] = None
         super().__init__(system_app)
 
     def init_app(self, system_app: SystemApp):
@@ -69,7 +74,64 @@ class NacosNamingClient(BaseComponent):
             "healthy": "true",
             "enabled": "true",
         }
-        await self._request("POST", "/nacos/v2/ns/instance", params=params)
+        await self._request("POST", "/nacos/v1/ns/instance", params=params)
+
+    def start_heartbeat(self) -> None:
+        nacos_config = self.nacos_config
+        if (
+            not nacos_config.enabled
+            or not nacos_config.register_on_startup
+            or not nacos_config.ephemeral
+            or self._heartbeat_task
+        ):
+            return
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+    async def stop_heartbeat(self) -> None:
+        if not self._heartbeat_task:
+            return
+        self._heartbeat_task.cancel()
+        try:
+            await self._heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._heartbeat_task = None
+
+    async def send_heartbeat_once(self) -> None:
+        nacos_config = self.nacos_config
+        ip = nacos_config.ip or self._resolve_local_ip()
+        port = nacos_config.port or self.app_config.service.web.port
+        beat = {
+            "serviceName": nacos_config.service_name,
+            "ip": ip,
+            "port": port,
+            "cluster": nacos_config.cluster_name,
+            "weight": 1.0,
+            "metadata": nacos_config.metadata,
+            "scheduled": True,
+        }
+        params = {
+            "serviceName": nacos_config.service_name,
+            "ip": ip,
+            "port": port,
+            "namespaceId": nacos_config.namespace_id,
+            "groupName": nacos_config.group_name,
+            "clusterName": nacos_config.cluster_name,
+            "ephemeral": str(nacos_config.ephemeral).lower(),
+            "beat": json.dumps(beat, separators=(",", ":"), ensure_ascii=False),
+        }
+        await self._request("PUT", "/nacos/v1/ns/instance/beat", params=params)
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.nacos_config.heartbeat_interval_ms / 1000)
+                await self.send_heartbeat_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Failed to send Nacos heartbeat: %s", exc)
 
     async def deregister_instance(self) -> None:
         nacos_config = self.nacos_config
@@ -84,7 +146,7 @@ class NacosNamingClient(BaseComponent):
             "clusterName": nacos_config.cluster_name,
             "ephemeral": str(nacos_config.ephemeral).lower(),
         }
-        await self._request("DELETE", "/nacos/v2/ns/instance", params=params)
+        await self._request("DELETE", "/nacos/v1/ns/instance", params=params)
 
     async def list_instances(
         self,
@@ -101,7 +163,9 @@ class NacosNamingClient(BaseComponent):
             "clusterName": cluster_name,
             "healthyOnly": "true",
         }
-        response = await self._request("GET", "/nacos/v2/ns/instance/list", params=params)
+        response = await self._request(
+            "GET", "/nacos/v1/ns/instance/list", params=params
+        )
         payload = response.json()
         hosts = payload.get("hosts", [])
         instances = []
@@ -187,6 +251,28 @@ class NacosNamingClient(BaseComponent):
 
     def _resolve_local_ip(self) -> str:
         try:
-            return socket.gethostbyname(socket.gethostname())
+            addresses = socket.getaddrinfo(
+                socket.gethostname(),
+                None,
+                family=socket.AF_INET,
+                type=socket.SOCK_STREAM,
+            )
+            seen = set()
+            for entry in addresses:
+                ip = entry[4][0]
+                if ip in seen:
+                    continue
+                seen.add(ip)
+                if not ip.startswith("127."):
+                    return ip
         except OSError:
-            return "127.0.0.1"
+            pass
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("8.8.8.8", 80))
+                ip = sock.getsockname()[0]
+                if ip and not ip.startswith("127."):
+                    return ip
+        except OSError:
+            pass
+        return "127.0.0.1"

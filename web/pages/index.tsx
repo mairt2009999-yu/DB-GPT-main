@@ -13,8 +13,10 @@ import ManusRightPanel, {
   PanelView,
 } from '@/new-components/chat/content/ManusRightPanel';
 import { MessagePart, ToolPart, ToolStatus } from '@/new-components/chat/content/OpenCodeSessionTurn';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import axios from '@/utils/ctx-axios';
 import { sendSpacePostRequest } from '@/utils/request';
+import { getUserId } from '@/utils/storage';
 import {
   ArrowUpOutlined,
   AudioOutlined,
@@ -36,8 +38,10 @@ import {
   PieChartOutlined,
   PlusOutlined,
   ReadOutlined,
+  ReloadOutlined,
   RightOutlined,
   SearchOutlined,
+  SendOutlined,
   TableOutlined,
   ThunderboltOutlined,
   UploadOutlined,
@@ -588,6 +592,17 @@ const Playground: NextPage = () => {
   const preloadedFilePathRef = useRef<string | null>(null);
 
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [gatewayLoading, setGatewayLoading] = useState(false);
+  const [gatewayDataSources, setGatewayDataSources] = useState<DataSource[] | null>(null);
+  const [gatewayKnowledgeSpaces, setGatewayKnowledgeSpaces] = useState<KnowledgeSpace[] | null>(null);
+  const [gatewaySkillsList, setGatewaySkillsList] = useState<Skill[] | null>(null);
+
+  const normalizeDataSources = (items: any[]): DataSource[] =>
+    (items || []).map((item: any) => ({
+      ...item,
+      db_name: item.db_name || item.params?.name || item.params?.database || `${item.type}-${item.id}`,
+      db_type: item.type,
+    })) as DataSource[];
 
   // Fetch Data Sources
   const { data: dataSources, loading: _loadingSources } = useRequest(async () => {
@@ -596,11 +611,7 @@ const Playground: NextPage = () => {
       // ctx-axios interceptor returns response.data directly, so response is {success, data, ...}
       const result = response?.success !== undefined ? response : response?.data;
       if (result?.success) {
-        return (result.data || []).map((item: any) => ({
-          ...item,
-          db_name: item.db_name || item.params?.name || item.params?.database || `${item.type}-${item.id}`,
-          db_type: item.type,
-        })) as DataSource[];
+        return normalizeDataSources(result.data || []);
       }
       return [];
     } catch (e) {
@@ -638,6 +649,26 @@ const Playground: NextPage = () => {
     return value == null ? '' : String(value);
   };
 
+  const normalizeSkills = (items: any[]): Skill[] =>
+    (items || []).map((item: any) => ({
+      id: String(item.id || item.name),
+      name: normalizeText(item.name),
+      description: normalizeText(item.description),
+      type: item.type === 'official' ? 'official' : 'personal',
+      icon:
+        item.skill_type === 'data_analysis'
+          ? '📊'
+          : item.skill_type === 'coding'
+            ? '💻'
+            : item.skill_type === 'web_search'
+              ? '🔍'
+              : item.skill_type === 'knowledge_qa'
+                ? '📚'
+                : item.skill_type === 'chat'
+                  ? '💬'
+                  : '⚡',
+    })) as Skill[];
+
   /** Extract the actual created skill name from shell_interpreter output.
    *  Uses priority-based matching to avoid returning 'skill-creator' (the tool path). */
   const extractCreatedSkillName = (allText: string): string | null => {
@@ -663,27 +694,10 @@ const Playground: NextPage = () => {
   // Fetch Skills/DBGPTs list
   const { data: skillsList, loading: _loadingSkills } = useRequest(async () => {
     try {
-      const response = await axios.get(`${process.env.API_BASE_URL ?? ''}/api/v1/skills/list`);
+      const response: any = await axios.get(`${process.env.API_BASE_URL ?? ''}/api/v1/skills/list`);
       // ctx-axios interceptor returns response.data directly
       if (response?.success && Array.isArray(response.data)) {
-        return response.data.map((item: any) => ({
-          id: String(item.id || item.name),
-          name: normalizeText(item.name),
-          description: normalizeText(item.description),
-          type: item.type === 'official' ? 'official' : 'personal',
-          icon:
-            item.skill_type === 'data_analysis'
-              ? '📊'
-              : item.skill_type === 'coding'
-                ? '💻'
-                : item.skill_type === 'web_search'
-                  ? '🔍'
-                  : item.skill_type === 'knowledge_qa'
-                    ? '📚'
-                    : item.skill_type === 'chat'
-                      ? '💬'
-                      : '⚡',
-        })) as Skill[];
+        return normalizeSkills(response.data);
       }
       return [];
     } catch (e) {
@@ -691,6 +705,112 @@ const Playground: NextPage = () => {
       return [];
     }
   });
+
+  const effectiveDataSources: DataSource[] = gatewayDataSources ?? dataSources ?? [];
+  const effectiveKnowledgeSpaces: KnowledgeSpace[] = gatewayKnowledgeSpaces ?? knowledgeSpaces ?? [];
+  const effectiveSkillsList: Skill[] = gatewaySkillsList ?? skillsList ?? [];
+
+  const getGatewayHeaders = (json = false): Record<string, string> => {
+    const headers: Record<string, string> = json ? { 'Content-Type': 'application/json' } : {};
+    const userId = getUserId();
+    if (userId) {
+      headers['X-User-Id'] = userId;
+    }
+    return headers;
+  };
+
+  const unwrapApiResult = (response: any) => {
+    if (response?.success !== undefined) return response;
+    if (response?.data?.success !== undefined) return response.data;
+    return response;
+  };
+
+  const prepareFileForChat = async (
+    inputQuery: string,
+    effectiveFile: any | null,
+    useGateway: boolean,
+  ): Promise<{ failed: boolean; finalQuery: string; filePath: string | null }> => {
+    let finalQuery = inputQuery;
+    let currentUploadedFilePath: string | null = null;
+
+    if (preloadedFilePathRef.current) {
+      currentUploadedFilePath = preloadedFilePathRef.current;
+      setUploadedFilePath(currentUploadedFilePath);
+      preloadedFilePathRef.current = null;
+      finalQuery = inputQuery || 'Analyze the uploaded file.';
+      return { failed: false, finalQuery, filePath: currentUploadedFilePath };
+    }
+
+    if (!effectiveFile) {
+      return { failed: false, finalQuery, filePath: null };
+    }
+
+    const formData = new FormData();
+    formData.append('file', effectiveFile);
+
+    try {
+      const uploadUrl = useGateway
+        ? `${GATEWAY_API_BASE}/api/v1/python/file/upload`
+        : `${process.env.API_BASE_URL ?? ''}/api/v1/python/file/upload`;
+      const uploadRes: any = await axios.post(uploadUrl, formData, {
+        headers: useGateway ? getGatewayHeaders() : { 'Content-Type': 'multipart/form-data' },
+      });
+
+      const resData = unwrapApiResult(uploadRes);
+      if (resData?.success && resData?.data) {
+        currentUploadedFilePath = resData.data;
+      } else if (typeof resData === 'string' && resData.length > 0) {
+        currentUploadedFilePath = resData;
+      } else {
+        const errMsg = resData?.err_msg || resData?.message || 'Unknown error';
+        message.error('File upload failed: ' + errMsg);
+        return { failed: true, finalQuery, filePath: null };
+      }
+
+      setUploadedFilePath(currentUploadedFilePath);
+      finalQuery = inputQuery || 'Analyze the uploaded file.';
+      return { failed: false, finalQuery, filePath: currentUploadedFilePath };
+    } catch (uploadErr: any) {
+      console.error('[Upload] error:', uploadErr);
+      const errDetail =
+        uploadErr?.response?.data?.err_msg ||
+        uploadErr?.response?.data?.message ||
+        uploadErr?.message ||
+        'Network error';
+      message.error('File upload failed: ' + errDetail);
+      return { failed: true, finalQuery, filePath: null };
+    }
+  };
+
+  const handleGatewayRefresh = async () => {
+    if (gatewayLoading) return;
+    setGatewayLoading(true);
+    try {
+      const [datasourceRes, knowledgeRes, skillsRes] = await Promise.all([
+        axios.get<any, any>(`${GATEWAY_API_BASE}/api/v2/serve/datasources`, { headers: getGatewayHeaders() }),
+        axios.post<any, any>(`${GATEWAY_API_BASE}/knowledge/space/list`, {}, { headers: getGatewayHeaders(true) }),
+        axios.get<any, any>(`${GATEWAY_API_BASE}/api/v1/skills/list`, { headers: getGatewayHeaders() }),
+      ]);
+
+      const datasourceResult = unwrapApiResult(datasourceRes);
+      const knowledgeResult = unwrapApiResult(knowledgeRes);
+      const skillsResult = unwrapApiResult(skillsRes);
+
+      if (!datasourceResult?.success) throw new Error(datasourceResult?.err_msg || 'Failed to load datasources');
+      if (!knowledgeResult?.success) throw new Error(knowledgeResult?.err_msg || 'Failed to load knowledge spaces');
+      if (!skillsResult?.success) throw new Error(skillsResult?.err_msg || 'Failed to load skills');
+
+      setGatewayDataSources(normalizeDataSources(datasourceResult.data || []));
+      setGatewayKnowledgeSpaces(knowledgeResult.data || []);
+      setGatewaySkillsList(normalizeSkills(skillsResult.data || []));
+      message.success('Gateway Refresh completed');
+    } catch (err: any) {
+      console.error('[Gateway Refresh] error:', err);
+      message.error(err?.message || 'Gateway Refresh failed');
+    } finally {
+      setGatewayLoading(false);
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1396,12 +1516,21 @@ const Playground: NextPage = () => {
    * 向量召回模式：调用 /api/v1/chat/completions + chat_with_db_execute
    * 仅召回与问题相关的表 DDL，Token 消耗低，适合表多但问题聚焦的场景。
    */
-  const handleVectorStart = async (inputQuery: string, effectiveDb: DataSource | null) => {
-    if (!inputQuery.trim() || loading) return;
+  const handleVectorStart = async (
+    inputQuery: string,
+    effectiveDb: DataSource | null,
+    effectiveFile: any | null = null,
+    useGateway = false,
+  ) => {
+    if ((!inputQuery.trim() && !effectiveFile) || loading) return;
     if (!effectiveDb) {
       message.warning('向量召回模式需要先选择数据库（点击工具栏数据库图标）');
       return;
     }
+
+    const preparedFile = await prepareFileForChat(inputQuery, effectiveFile, useGateway);
+    if (preparedFile.failed) return;
+    const finalQuery = preparedFile.finalQuery;
 
     const currentConvId = conversationId || generateUUID();
     if (!conversationId) setConversationId(currentConvId);
@@ -1417,6 +1546,13 @@ const Playground: NextPage = () => {
         context: inputQuery,
         order: currentOrder,
         attachedDb: { db_name: effectiveDb.db_name, db_type: effectiveDb.db_type },
+        attachedFile: effectiveFile
+          ? {
+              name: effectiveFile.name,
+              size: effectiveFile.size,
+              type: effectiveFile.type,
+            }
+          : undefined,
       },
       { id: responseId, role: 'view' as const, context: '', order: currentOrder, thinking: true },
     ]);
@@ -1426,20 +1562,28 @@ const Playground: NextPage = () => {
     setActiveViewMsgId(responseId);
 
     try {
-      const response = await fetch(`${process.env.API_BASE_URL ?? ''}/api/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conv_uid: currentConvId,
-          chat_mode: 'chat_with_db_execute',
-          model_name: model,
-          user_input: inputQuery,
-          select_param: effectiveDb.db_name,
-          temperature: 0.6,
-          max_new_tokens: 4000,
-          incremental: true,
-        }),
-      });
+      const response = await fetch(
+        useGateway
+          ? `${GATEWAY_API_BASE}/api/v1/chat/completions`
+          : `${process.env.API_BASE_URL ?? ''}/api/v1/chat/completions`,
+        {
+          method: 'POST',
+          headers: useGateway ? getGatewayHeaders(true) : { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conv_uid: currentConvId,
+            chat_mode: 'chat_with_db_execute',
+            model_name: model,
+            user_input: finalQuery,
+            select_param: effectiveDb.db_name,
+            temperature: 0.6,
+            max_new_tokens: 4000,
+            incremental: true,
+            ext_info: {
+              ...(preparedFile.filePath ? { file_path: preparedFile.filePath } : {}),
+            },
+          }),
+        },
+      );
 
       if (!response.body) throw new Error('No response body');
 
@@ -1466,6 +1610,7 @@ const Playground: NextPage = () => {
         }
       };
 
+      // eslint-disable-next-line no-constant-condition
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -1498,14 +1643,16 @@ const Playground: NextPage = () => {
     overrideFile?: File | null,
     overrideSkill?: Skill | null,
     overrideDb?: DataSource | null,
+    options?: { gateway?: boolean },
   ) => {
+    const useGateway = options?.gateway ?? false;
     const effectiveFile = overrideFile !== undefined ? overrideFile : uploadedFile;
     const effectiveSkill = overrideSkill !== undefined ? overrideSkill : selectedSkill;
     const effectiveDb = overrideDb !== undefined ? overrideDb : selectedDb;
 
     // 向量召回模式走独立函数
     if (queryMode === 'vector') {
-      await handleVectorStart(inputQuery, effectiveDb);
+      await handleVectorStart(inputQuery, effectiveDb, effectiveFile, useGateway);
       return;
     }
 
@@ -1514,50 +1661,14 @@ const Playground: NextPage = () => {
     let finalQuery = inputQuery;
     const appCode = 'chat_react_agent';
     const chatMode = 'chat_react_agent';
-    let currentUploadedFilePath = null;
+    let currentUploadedFilePath: string | null = null;
 
     // Handle File Upload if present
-    if (preloadedFilePathRef.current) {
-      // Example file already copied to server - skip upload
-      currentUploadedFilePath = preloadedFilePathRef.current;
-      setUploadedFilePath(currentUploadedFilePath);
-      preloadedFilePathRef.current = null;
-      finalQuery = inputQuery || 'Analyze the uploaded file.';
-    } else if (effectiveFile) {
-      const formData = new FormData();
-      formData.append('file', effectiveFile);
-
-      try {
-        const uploadRes = await axios.post(`${process.env.API_BASE_URL ?? ''}/api/v1/python/file/upload`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        });
-
-        const resData = uploadRes.data;
-        // Handle both wrapped Result {success, data} and raw string path
-        if (resData?.success && resData?.data) {
-          currentUploadedFilePath = resData.data;
-          setUploadedFilePath(currentUploadedFilePath);
-          finalQuery = inputQuery || 'Analyze the uploaded Excel file.';
-        } else if (typeof resData === 'string' && resData.length > 0) {
-          // Backend returned the file path directly as a string
-          currentUploadedFilePath = resData;
-          setUploadedFilePath(currentUploadedFilePath);
-          finalQuery = inputQuery || 'Analyze the uploaded Excel file.';
-        } else {
-          const errMsg = resData?.err_msg || resData?.message || 'Unknown error';
-          message.error('File upload failed: ' + errMsg);
-          return;
-        }
-      } catch (uploadErr: any) {
-        console.error('[Upload] error:', uploadErr);
-        const errDetail =
-          uploadErr?.response?.data?.err_msg ||
-          uploadErr?.response?.data?.message ||
-          uploadErr?.message ||
-          'Network error';
-        message.error('File upload failed: ' + errDetail);
-        return;
-      }
+    if (preloadedFilePathRef.current || effectiveFile) {
+      const preparedFile = await prepareFileForChat(inputQuery, effectiveFile, useGateway);
+      if (preparedFile.failed) return;
+      finalQuery = preparedFile.finalQuery;
+      currentUploadedFilePath = preparedFile.filePath;
     } else {
       if (uploadedFilePath) {
         setUploadedFilePath(null);
@@ -1633,30 +1744,33 @@ const Playground: NextPage = () => {
     setActiveMessageId(responseId);
 
     try {
-      const response = await fetch(`${process.env.API_BASE_URL ?? ''}/api/v1/chat/react-agent`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      const response = await fetch(
+        useGateway
+          ? `${GATEWAY_API_BASE}/api/v1/chat/react-agent`
+          : `${process.env.API_BASE_URL ?? ''}/api/v1/chat/react-agent`,
+        {
+          method: 'POST',
+          headers: useGateway ? getGatewayHeaders(true) : { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conv_uid: currentConvId,
+            chat_mode: chatMode,
+            model_name: model,
+            user_input: finalQuery,
+            temperature: 0.6,
+            max_new_tokens: 4000,
+            select_param: appCode === 'chat_react_agent' ? '' : appCode,
+            ext_info: {
+              ...(currentUploadedFilePath ? { file_path: currentUploadedFilePath } : {}),
+              ...(effectiveSkill ? { skill_id: effectiveSkill.id, skill_name: effectiveSkill.name } : {}),
+              ...(effectiveDb ? { database_name: effectiveDb.db_name, database_type: effectiveDb.db_type } : {}),
+              ...(selectedKnowledge
+                ? { knowledge_space_name: selectedKnowledge.name, knowledge_space_id: selectedKnowledge.id }
+                : {}),
+            },
+          }),
+          signal: controller.signal,
         },
-        body: JSON.stringify({
-          conv_uid: currentConvId,
-          chat_mode: chatMode,
-          model_name: model,
-          user_input: finalQuery,
-          temperature: 0.6,
-          max_new_tokens: 4000,
-          select_param: appCode === 'chat_react_agent' ? '' : appCode,
-          ext_info: {
-            ...(currentUploadedFilePath ? { file_path: currentUploadedFilePath } : {}),
-            ...(effectiveSkill ? { skill_id: effectiveSkill.id, skill_name: effectiveSkill.name } : {}),
-            ...(effectiveDb ? { database_name: effectiveDb.db_name, database_type: effectiveDb.db_type } : {}),
-            ...(selectedKnowledge
-              ? { knowledge_space_name: selectedKnowledge.name, knowledge_space_id: selectedKnowledge.id }
-              : {}),
-          },
-        }),
-        signal: controller.signal,
-      });
+      );
 
       if (!response.body) {
         throw new Error('No response body');
@@ -2032,9 +2146,11 @@ const Playground: NextPage = () => {
 
       // If example has a file, request it from backend
       if (example.fileName) {
-        const res = await axios.post(`${process.env.API_BASE_URL ?? ''}/api/v1/examples/use`, {
-          example_id: example.id,
-        });
+        const res = await axios.post(
+          `${GATEWAY_API_BASE}/api/v1/examples/use`,
+          { example_id: example.id },
+          { headers: getGatewayHeaders(true) },
+        );
 
         if (res?.success && res?.data) {
           filePath = res.data;
@@ -2055,8 +2171,8 @@ const Playground: NextPage = () => {
 
       // Auto-select skill if example specifies one
       let exampleSkill: Skill | null = null;
-      if (example.skillName && skillsList) {
-        const matched = skillsList.find(s => s.name === example.skillName);
+      if (example.skillName && effectiveSkillsList) {
+        const matched = effectiveSkillsList.find(s => s.name === example.skillName);
         if (matched) {
           exampleSkill = matched;
           setSelectedSkill(matched);
@@ -2065,8 +2181,8 @@ const Playground: NextPage = () => {
 
       // Auto-select database if example specifies one
       let matchedDb: DataSource | null = null;
-      if (example.dbName && dataSources) {
-        const found = dataSources.find((ds: DataSource) => ds.db_name === example.dbName);
+      if (example.dbName && effectiveDataSources) {
+        const found = effectiveDataSources.find((ds: DataSource) => ds.db_name === example.dbName);
         if (found) {
           matchedDb = found;
           setSelectedDb(found);
@@ -2651,7 +2767,7 @@ const Playground: NextPage = () => {
                                     />
                                   </div>
                                   <div className='max-h-[300px] overflow-y-auto'>
-                                    {(skillsList || [])
+                                    {effectiveSkillsList
                                       .filter(
                                         skill =>
                                           !skillSearchQuery ||
@@ -2703,7 +2819,7 @@ const Playground: NextPage = () => {
                                           )}
                                         </div>
                                       ))}
-                                    {(skillsList || []).filter(
+                                    {effectiveSkillsList.filter(
                                       skill =>
                                         !skillSearchQuery ||
                                         skill.name.toLowerCase().includes(skillSearchQuery.toLowerCase()) ||
@@ -2719,7 +2835,7 @@ const Playground: NextPage = () => {
                                   </div>
                                   <div className='border-t border-gray-100 dark:border-gray-700 px-3 py-2 flex items-center justify-between bg-gray-50/50 dark:bg-gray-900/50'>
                                     <span className='text-[10px] text-gray-400'>
-                                      {(skillsList || []).length} 个技能可用
+                                      {effectiveSkillsList.length} 个技能可用
                                     </span>
                                     <Button
                                       type='link'
@@ -2815,6 +2931,30 @@ const Playground: NextPage = () => {
                           </div>
 
                           <div className='flex items-center gap-3'>
+                            <Tooltip title={`Gateway Refresh: ${GATEWAY_API_BASE}`}>
+                              <Button
+                                size='small'
+                                icon={<ReloadOutlined />}
+                                onClick={handleGatewayRefresh}
+                                loading={gatewayLoading}
+                                className='h-9 px-3 rounded-lg border-gray-200 text-gray-600 hover:text-blue-600 hover:border-blue-300 dark:border-white/10 dark:text-gray-300 dark:bg-[#202126]'
+                              >
+                                Gateway Refresh
+                              </Button>
+                            </Tooltip>
+
+                            <Tooltip title={`Gateway Send: ${GATEWAY_API_BASE}`}>
+                              <Button
+                                size='small'
+                                icon={<SendOutlined />}
+                                onClick={() => handleStart(query, undefined, undefined, undefined, { gateway: true })}
+                                disabled={(!query.trim() && !uploadedFile) || loading}
+                                className='h-9 px-3 rounded-lg border-blue-200 text-blue-600 hover:border-blue-400 dark:border-blue-700 dark:text-blue-300 dark:bg-blue-950/20'
+                              >
+                                Gateway Send
+                              </Button>
+                            </Tooltip>
+
                             {/* Voice Button */}
                             <Tooltip title={t('voice_input')}>
                               <Button
@@ -3100,7 +3240,7 @@ const Playground: NextPage = () => {
                                   />
                                 </div>
                                 <div className='max-h-[300px] overflow-y-auto'>
-                                  {(skillsList || [])
+                                  {effectiveSkillsList
                                     .filter(
                                       skill =>
                                         !skillSearchQuery ||
@@ -3152,7 +3292,7 @@ const Playground: NextPage = () => {
                                         )}
                                       </div>
                                     ))}
-                                  {(skillsList || []).filter(
+                                  {effectiveSkillsList.filter(
                                     skill =>
                                       !skillSearchQuery ||
                                       skill.name.toLowerCase().includes(skillSearchQuery.toLowerCase()) ||
@@ -3168,7 +3308,7 @@ const Playground: NextPage = () => {
                                 </div>
                                 <div className='border-t border-gray-100 dark:border-gray-700 px-3 py-2 flex items-center justify-between bg-gray-50/50 dark:bg-gray-900/50'>
                                   <span className='text-[10px] text-gray-400'>
-                                    {(skillsList || []).length} 个技能可用
+                                    {effectiveSkillsList.length} 个技能可用
                                   </span>
                                   <Button
                                     type='link'
@@ -3234,7 +3374,7 @@ const Playground: NextPage = () => {
                                   />
                                 </div>
                                 <div className='max-h-[300px] overflow-y-auto'>
-                                  {(dataSources || [])
+                                  {effectiveDataSources
                                     .filter(
                                       ds =>
                                         !dbSearchQuery ||
@@ -3278,7 +3418,7 @@ const Playground: NextPage = () => {
                                         )}
                                       </div>
                                     ))}
-                                  {(dataSources || []).filter(
+                                  {effectiveDataSources.filter(
                                     ds =>
                                       !dbSearchQuery ||
                                       ds.db_name.toLowerCase().includes(dbSearchQuery.toLowerCase()) ||
@@ -3296,7 +3436,7 @@ const Playground: NextPage = () => {
                                 </div>
                                 <div className='border-t border-gray-100 dark:border-gray-700 px-3 py-2 flex items-center justify-between bg-gray-50/50 dark:bg-gray-900/50'>
                                   <span className='text-[10px] text-gray-400'>
-                                    {(dataSources || []).length} 个数据库可用
+                                    {effectiveDataSources.length} 个数据库可用
                                   </span>
                                   <Button
                                     type='link'
@@ -3362,7 +3502,7 @@ const Playground: NextPage = () => {
                                   />
                                 </div>
                                 <div className='max-h-[300px] overflow-y-auto'>
-                                  {(knowledgeSpaces || [])
+                                  {effectiveKnowledgeSpaces
                                     .filter(
                                       space =>
                                         !knowledgeSearchQuery ||
@@ -3402,7 +3542,7 @@ const Playground: NextPage = () => {
                                         )}
                                       </div>
                                     ))}
-                                  {(knowledgeSpaces || []).filter(
+                                  {effectiveKnowledgeSpaces.filter(
                                     space =>
                                       !knowledgeSearchQuery ||
                                       space.name.toLowerCase().includes(knowledgeSearchQuery.toLowerCase()) ||
@@ -3419,7 +3559,7 @@ const Playground: NextPage = () => {
                                 </div>
                                 <div className='border-t border-gray-100 dark:border-gray-700 px-3 py-2 flex items-center justify-between bg-gray-50/50 dark:bg-gray-900/50'>
                                   <span className='text-[10px] text-gray-400'>
-                                    {(knowledgeSpaces || []).length} 个知识库可用
+                                    {effectiveKnowledgeSpaces.length} 个知识库可用
                                   </span>
                                   <Button
                                     type='link'
@@ -3517,6 +3657,30 @@ const Playground: NextPage = () => {
                         </div>
 
                         <div className='flex items-center gap-3'>
+                          <Tooltip title={`Gateway Refresh: ${GATEWAY_API_BASE}`}>
+                            <Button
+                              size='small'
+                              icon={<ReloadOutlined />}
+                              onClick={handleGatewayRefresh}
+                              loading={gatewayLoading}
+                              className='h-9 px-3 rounded-lg border-gray-200 text-gray-600 hover:text-blue-600 hover:border-blue-300 dark:border-white/10 dark:text-gray-300 dark:bg-[#202126]'
+                            >
+                              Gateway Refresh
+                            </Button>
+                          </Tooltip>
+
+                          <Tooltip title={`Gateway Send: ${GATEWAY_API_BASE}`}>
+                            <Button
+                              size='small'
+                              icon={<SendOutlined />}
+                              onClick={() => handleStart(query, undefined, undefined, undefined, { gateway: true })}
+                              disabled={(!query.trim() && !uploadedFile) || loading}
+                              className='h-9 px-3 rounded-lg border-blue-200 text-blue-600 hover:border-blue-400 dark:border-blue-700 dark:text-blue-300 dark:bg-blue-950/20'
+                            >
+                              Gateway Send
+                            </Button>
+                          </Tooltip>
+
                           {/* Voice Button */}
                           <Tooltip title={t('voice_input')}>
                             <Button
@@ -3651,7 +3815,7 @@ const Playground: NextPage = () => {
         >
           <List
             itemLayout='horizontal'
-            dataSource={dataSources || []}
+            dataSource={effectiveDataSources}
             renderItem={(item: DataSource) => (
               <List.Item
                 className={`cursor-pointer hover:bg-gray-50 rounded-lg px-2 transition-colors ${selectedDb?.id === item.id ? 'bg-blue-50' : ''}`}
@@ -3692,7 +3856,7 @@ const Playground: NextPage = () => {
         >
           <List
             itemLayout='horizontal'
-            dataSource={knowledgeSpaces || []}
+            dataSource={effectiveKnowledgeSpaces}
             renderItem={(item: KnowledgeSpace) => (
               <List.Item
                 className={`cursor-pointer hover:bg-gray-50 rounded-lg px-2 transition-colors ${selectedKnowledge?.id === item.id ? 'bg-orange-50' : ''}`}

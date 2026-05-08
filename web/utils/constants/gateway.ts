@@ -1,0 +1,3 @@
+export const DEFAULT_GATEWAY_API_BASE = 'http://127.0.0.1:8080/api/dbgpt/v1';
+
+export const GATEWAY_API_BASE = process.env.NEXT_PUBLIC_GATEWAY_API_BASE ?? DEFAULT_GATEWAY_API_BASE;

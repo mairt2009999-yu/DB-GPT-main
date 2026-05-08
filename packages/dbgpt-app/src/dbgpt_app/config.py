@@ -330,7 +330,7 @@ class ServiceWebParameters(BaseParameters):
 class NacosClientConfig(BaseParameters):
     enabled: bool = field(default=False, metadata={"help": _("Enable Nacos naming")})
     service_name: str = field(
-        default="dbgpt-webserver",
+        default="dbgpt-service",
         metadata={"help": _("Service name registered in Nacos")},
     )
     server_addr: str = field(
@@ -397,6 +397,10 @@ class NacosClientConfig(BaseParameters):
         default=3000,
         metadata={"help": _("Per-request timeout in milliseconds")},
     )
+    heartbeat_interval_ms: int = field(
+        default=5000,
+        metadata={"help": _("Nacos ephemeral instance heartbeat interval")},
+    )
     max_retries: int = field(
         default=1,
         metadata={"help": _("Retry count for Nacos OpenAPI requests")},
@@ -449,7 +453,7 @@ class RemoteServiceConfig(BaseParameters):
         },
     )
     path_prefix: str = field(
-        default="/api/v1/users",
+        default="/internal/auth/users",
         metadata={"help": _("Path prefix used when calling the remote service")},
     )
     cache_ttl_seconds: int = field(
@@ -463,6 +467,14 @@ class RemoteServiceConfig(BaseParameters):
     permissions_path: str = field(
         default="/permissions",
         metadata={"help": _("Path used to fetch permissions when not in profile")},
+    )
+    roles_path: str = field(
+        default="/{user_id}/roles",
+        metadata={"help": _("Path used to fetch user roles by user id")},
+    )
+    sql_fragment_path: str = field(
+        default="/{user_id}/sql-fragment",
+        metadata={"help": _("Path used to fetch SQL fragment by user id")},
     )
 
 

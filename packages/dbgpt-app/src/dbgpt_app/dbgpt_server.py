@@ -204,7 +204,9 @@ def initialize_app(
     with _stage(startup_profiler, "register_default_data_sources"):
         try:
             from dbgpt.configs.model_config import PILOT_PATH, ROOT_PATH
-            from dbgpt_serve.datasource.manages.connect_config_db import ConnectConfigDao
+            from dbgpt_serve.datasource.manages.connect_config_db import (
+                ConnectConfigDao,
+            )
 
             dao = ConnectConfigDao()
             db_name = "Walmart_Sales"
@@ -305,7 +307,12 @@ def run_uvicorn(
         # https://github.com/encode/starlette/issues/617
         cors_app = CORSMiddleware(
             app=app,
-            allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5670", "http://127.0.0.1:5670"],
+            allow_origins=[
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+                "http://localhost:5670",
+                "http://127.0.0.1:5670",
+            ],
             allow_credentials=True,
             allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
             allow_headers=["*"],

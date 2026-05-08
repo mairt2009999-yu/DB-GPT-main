@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import json
+import logging
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.types import ASGIApp
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp
 
 from dbgpt_app.microservice.context import (
     RequestContext,
-    reset_current_resolved_principal,
     reset_current_request_context,
-    set_current_resolved_principal,
+    reset_current_resolved_principal,
     set_current_request_context,
+    set_current_resolved_principal,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _split_roles(raw_roles: str | None) -> list[str]:
@@ -20,14 +25,34 @@ def _split_roles(raw_roles: str | None) -> list[str]:
     return [role.strip() for role in raw_roles.split(",") if role.strip()]
 
 
+def _extract_user_id_from_user_info(raw_user_info: str | None) -> str | None:
+    if not raw_user_info:
+        return None
+    try:
+        user_info = json.loads(raw_user_info)
+    except json.JSONDecodeError:
+        logger.warning("Invalid X-User-Info JSON: %s", raw_user_info)
+        return None
+    if not isinstance(user_info, dict):
+        return None
+    user_id = user_info.get("userId") or user_info.get("user_id")
+    return str(user_id) if user_id else None
+
+
 class ContextMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next):
+        user_info_header = request.headers.get("X-User-Info")
+        if user_info_header:
+            logger.info("X-User-Info: %s", user_info_header)
         request_context = RequestContext(
             authorization=request.headers.get("Authorization"),
-            user_id=request.headers.get("X-User-Id"),
+            user_id=(
+                request.headers.get("X-User-Id")
+                or _extract_user_id_from_user_info(user_info_header)
+            ),
             tenant_id=request.headers.get("X-Tenant-Id"),
             request_id=request.headers.get("X-Request-Id"),
             roles=_split_roles(request.headers.get("X-Roles")),
@@ -36,9 +61,7 @@ class ContextMiddleware(BaseHTTPMiddleware):
         request.state.request_context = request_context
         token = set_current_request_context(request_context)
         try:
-            if request.url.path.startswith("/api") and (
-                request_context.user_id or request_context.authorization
-            ):
+            if request.url.path.startswith("/api") and request_context.user_id:
                 response = await self._resolve_principal(request, request_context)
                 if response is not None:
                     return response
