@@ -59,12 +59,12 @@ class ChatWithDbAutoExecute(BaseChat):
         client = DBSummaryClient(system_app=self.system_app)
 
         print(
-            f"\n{'>'*60}"
+            f"\n{'>' * 60}"
             f"\n>>>>>>>> [DB对话任务] 开始加载数据库 Schema 向量上下文"
             f"\n>>>>>>>> 数据库: {self.db_name}"
             f"\n>>>>>>>> 用户问题: {user_input[:120]}"
             f"\n>>>>>>>> top_k={self.curr_config.schema_retrieve_top_k}"
-            f"\n{'>'*60}"
+            f"\n{'>' * 60}"
         )
 
         try:
@@ -80,7 +80,7 @@ class ChatWithDbAutoExecute(BaseChat):
                 f"\n>>>>>>>> [DB对话任务] Schema 向量检索成功"
                 f"\n>>>>>>>> 命中相关表数量: {len(table_infos)}"
                 f"\n>>>>>>>> 检索路径: 向量数据库 → DBSchemaRetriever"
-                f"\n{'>'*60}\n"
+                f"\n{'>' * 60}\n"
             )
             # ── 零命中降级：vector检索失败时直接读取数据库所有表结构 ──────────
             if not table_infos:
@@ -97,7 +97,7 @@ class ChatWithDbAutoExecute(BaseChat):
                     table_infos = table_infos[: self.curr_config.schema_max_tokens]
                 print(
                     f">>>>>>>> [DB对话任务] 零命中降级完成 | 获取 {len(table_infos)} 条表结构"
-                    f"\n{'>'*60}\n"
+                    f"\n{'>' * 60}\n"
                 )
             # ─────────────────────────────────────────────────────────────────
         except Exception as e:
@@ -105,7 +105,7 @@ class ChatWithDbAutoExecute(BaseChat):
                 f"\n>>>>>>>> [DB对话任务] ⚠️  向量检索失败，降级到全量 DDL 读取！"
                 f"\n>>>>>>>> 失败原因: {e}"
                 f"\n>>>>>>>> 降级路径: table_simple_info() 直接读取数据库表结构"
-                f"\n{'>'*60}"
+                f"\n{'>' * 60}"
             )
             logger.error(f"Retrieved table info error: {str(e)}")
             table_infos = await blocking_func_to_async(
@@ -115,9 +115,8 @@ class ChatWithDbAutoExecute(BaseChat):
                 table_infos = table_infos[: self.curr_config.schema_max_tokens]
             print(
                 f">>>>>>>> [DB对话任务] 降级读取完成 | 获取 {len(table_infos)} 条表信息"
-                f"\n{'>'*60}\n"
+                f"\n{'>' * 60}\n"
             )
-
 
         input_values = {
             "db_name": self.db_name,

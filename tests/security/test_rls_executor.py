@@ -8,7 +8,10 @@ from dbgpt_app.security.rls_executor import RLSAwareSQLExecutor, SQLExecutionRes
 from dbgpt_app.security.principal import Principal
 from dbgpt_app.security.rls_client import RLSTableRef, RLSRule
 from dbgpt_app.security.stub_rls_client import StubRLSClient
-from dbgpt_app.security.exceptions import PermissionDeniedError, RLSUpstreamUnavailableError
+from dbgpt_app.security.exceptions import (
+    PermissionDeniedError,
+    RLSUpstreamUnavailableError,
+)
 
 
 @pytest.fixture
@@ -47,9 +50,9 @@ async def test_mode_off_bypasses_rls(datasource, principal):
 @pytest.mark.asyncio
 async def test_mode_enforce_rewrites_sql(datasource, principal):
     mock_client = AsyncMock()
-    mock_client.batch_fetch = AsyncMock(return_value=[
-        RLSRule(table="orders", allowed=True, predicate="region = 'A'")
-    ])
+    mock_client.batch_fetch = AsyncMock(
+        return_value=[RLSRule(table="orders", allowed=True, predicate="region = 'A'")]
+    )
     executor = _make_executor(datasource, mock_client, principal, mode="enforce")
     result = await executor.execute("SELECT id FROM orders")
     assert "region" in result.rewritten_sql
@@ -59,9 +62,9 @@ async def test_mode_enforce_rewrites_sql(datasource, principal):
 @pytest.mark.asyncio
 async def test_mode_shadow_executes_original_sql(datasource, principal):
     mock_client = AsyncMock()
-    mock_client.batch_fetch = AsyncMock(return_value=[
-        RLSRule(table="orders", allowed=True, predicate="region = 'A'")
-    ])
+    mock_client.batch_fetch = AsyncMock(
+        return_value=[RLSRule(table="orders", allowed=True, predicate="region = 'A'")]
+    )
     executor = _make_executor(datasource, mock_client, principal, mode="shadow")
     result = await executor.execute("SELECT id FROM orders")
     # Shadow mode: executed_sql is original, but rewritten_sql is computed
@@ -76,9 +79,9 @@ async def test_mode_shadow_executes_original_sql(datasource, principal):
 @pytest.mark.asyncio
 async def test_permission_denied_raises(datasource, principal):
     mock_client = AsyncMock()
-    mock_client.batch_fetch = AsyncMock(return_value=[
-        RLSRule(table="orders", allowed=False, predicate="")
-    ])
+    mock_client.batch_fetch = AsyncMock(
+        return_value=[RLSRule(table="orders", allowed=False, predicate="")]
+    )
     executor = _make_executor(datasource, mock_client, principal, mode="enforce")
     with pytest.raises(PermissionDeniedError):
         await executor.execute("SELECT id FROM orders")

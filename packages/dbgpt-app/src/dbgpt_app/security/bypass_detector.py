@@ -1,4 +1,5 @@
 """Detect calls to datasource.run_to_df that bypass RLSAwareSQLExecutor."""
+
 from __future__ import annotations
 
 import inspect

@@ -1,4 +1,5 @@
 """Step 3 of RLSAwareSQLExecutor: inject RLS predicates into the SQL AST."""
+
 from __future__ import annotations
 
 import sqlglot
@@ -61,16 +62,20 @@ def _inject_into_where(tree: exp.Expression, pred_expr: exp.Expression) -> None:
         return
     existing_where = select.args.get("where")
     if existing_where:
-        new_where = exp.Where(this=exp.And(
-            this=existing_where.this,
-            expression=pred_expr,
-        ))
+        new_where = exp.Where(
+            this=exp.And(
+                this=existing_where.this,
+                expression=pred_expr,
+            )
+        )
     else:
         new_where = exp.Where(this=pred_expr)
     select.set("where", new_where)
 
 
-def _inject_into_on(tree: exp.Expression, alias: str, pred_expr: exp.Expression) -> None:
+def _inject_into_on(
+    tree: exp.Expression, alias: str, pred_expr: exp.Expression
+) -> None:
     """AND pred_expr into the ON clause of the LEFT JOIN matching alias."""
     for join in tree.find_all(exp.Join):
         side = getattr(join, "side", None)

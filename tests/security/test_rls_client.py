@@ -18,21 +18,27 @@ def principal():
 
 @pytest.fixture
 def tables():
-    return [RLSTableRef(datasource="ds", schema="sales", table="orders", alias="orders")]
+    return [
+        RLSTableRef(datasource="ds", schema="sales", table="orders", alias="orders")
+    ]
 
 
 @pytest.mark.asyncio
 async def test_batch_fetch_calls_user_service(principal, tables):
     mock_user_svc = AsyncMock()
     mock_user_svc.get_sql_fragment_by_user_id = AsyncMock(
-        return_value=SqlFragment(user_id="alice", table_code="orders", sql_fragment='create_by="1"')
+        return_value=SqlFragment(
+            user_id="alice", table_code="orders", sql_fragment='create_by="1"'
+        )
     )
     client = RLSClient(user_service=mock_user_svc, local_ttl_seconds=60)
     rules = await client.batch_fetch(principal, tables)
     assert len(rules) == 1
     assert rules[0].allowed is True
     assert rules[0].predicate == 'create_by="1"'
-    mock_user_svc.get_sql_fragment_by_user_id.assert_awaited_once_with(principal, "orders")
+    mock_user_svc.get_sql_fragment_by_user_id.assert_awaited_once_with(
+        principal, "orders"
+    )
 
 
 @pytest.mark.asyncio
@@ -73,7 +79,9 @@ async def test_batch_fetch_service_unavailable_raises(principal, tables):
 async def test_batch_fetch_l1_cache_hit(principal, tables):
     mock_user_svc = AsyncMock()
     mock_user_svc.get_sql_fragment_by_user_id = AsyncMock(
-        return_value=SqlFragment(user_id="alice", table_code="orders", sql_fragment='create_by="1"')
+        return_value=SqlFragment(
+            user_id="alice", table_code="orders", sql_fragment='create_by="1"'
+        )
     )
     client = RLSClient(user_service=mock_user_svc, local_ttl_seconds=60)
     await client.batch_fetch(principal, tables)
@@ -86,7 +94,9 @@ async def test_batch_fetch_stale_fallback_on_failure(principal, tables):
     mock_user_svc = AsyncMock()
     mock_user_svc.get_sql_fragment_by_user_id = AsyncMock(
         side_effect=[
-            SqlFragment(user_id="alice", table_code="orders", sql_fragment='create_by="1"'),
+            SqlFragment(
+                user_id="alice", table_code="orders", sql_fragment='create_by="1"'
+            ),
             ServiceUnavailableError("down"),
         ]
     )

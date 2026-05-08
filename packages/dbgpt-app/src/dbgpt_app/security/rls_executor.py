@@ -108,8 +108,10 @@ class RLSAwareSQLExecutor:
             rls_mode="enforce",
         )
         result = await executor.execute("SELECT * FROM orders WHERE dt = '2024-01'")
-        print(result.rewritten_sql)   # 带谓词的改写后 SQL
-        print(result.rls_snapshot)    # {"orders": "region IN ('华南') AND owner_id = 1001"}
+        print(result.rewritten_sql)  # 带谓词的改写后 SQL
+        print(
+            result.rls_snapshot
+        )  # {"orders": "region IN ('华南') AND owner_id = 1001"}
     """
 
     def __init__(
@@ -170,7 +172,10 @@ class RLSAwareSQLExecutor:
             # shadow 模式：记录改写结果但实际执行原 SQL
             logger.info(
                 "[RLS shadow] conv=%s original=%r rewritten=%r snapshot=%r",
-                self._conversation_id, sql, rewritten_sql, rls_snapshot,
+                self._conversation_id,
+                sql,
+                rewritten_sql,
+                rls_snapshot,
             )
             data = await self._run_sql(sql, timeout_seconds)
         else:
@@ -217,6 +222,7 @@ class RLSAwareSQLExecutor:
     def _parse_and_collect_tables(self, sql: str, dialect: str):
         """Step 1：用 sqlglot 解析 SQL，返回 (AST tree, tables)。"""
         from dbgpt_app.security import rls_parser
+
         return rls_parser.parse_and_collect(
             sql, dialect, datasource=self._datasource.db_name
         )
@@ -232,17 +238,26 @@ class RLSAwareSQLExecutor:
     async def _write_audit(self, executed_sql: str, rls_snapshot: Dict[str, str]):
         """Step 5：结构化 JSON 审计日志（仅 logger.info，不写 DB，不抛异常）。"""
         try:
-            logger.info(json.dumps({
-                "conv_id": self._conversation_id,
-                "mode": self._rls_mode,
-                "user_id": getattr(self._principal, "user_id", None),
-                "executed_sql": executed_sql,
-                "snapshot": rls_snapshot,
-            }, ensure_ascii=False))
+            logger.info(
+                json.dumps(
+                    {
+                        "conv_id": self._conversation_id,
+                        "mode": self._rls_mode,
+                        "user_id": getattr(self._principal, "user_id", None),
+                        "executed_sql": executed_sql,
+                        "snapshot": rls_snapshot,
+                    },
+                    ensure_ascii=False,
+                )
+            )
         except Exception as e:
-            logger.warning("RLS 审计日志写入失败 conv=%s err=%s", self._conversation_id, e)
+            logger.warning(
+                "RLS 审计日志写入失败 conv=%s err=%s", self._conversation_id, e
+            )
 
-    async def _execute_bypass(self, sql: str, timeout_seconds: float = 30) -> SQLExecutionResult:
+    async def _execute_bypass(
+        self, sql: str, timeout_seconds: float = 30
+    ) -> SQLExecutionResult:
         """rls_mode=off 时的快速路径：直接执行，不改写，不审计。"""
         data = await self._run_sql(sql, timeout_seconds)
         return SQLExecutionResult(

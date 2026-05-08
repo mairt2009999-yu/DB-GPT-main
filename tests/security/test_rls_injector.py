@@ -34,7 +34,9 @@ def test_simple_select_no_existing_where():
 
 
 def test_simple_select_existing_where():
-    out = _inject("SELECT id FROM orders WHERE status = 1", {"orders": "region = '华南'"})
+    out = _inject(
+        "SELECT id FROM orders WHERE status = 1", {"orders": "region = '华南'"}
+    )
     assert "status" in out and "华南" in out
     assert _parses(out)
 
@@ -108,7 +110,9 @@ def test_self_join_both_aliases_injected():
 
 # ----- Postgres -----
 def test_postgres_dialect():
-    out = _inject("SELECT id FROM orders", {"orders": "region = 'A'"}, dialect="postgres")
+    out = _inject(
+        "SELECT id FROM orders", {"orders": "region = 'A'"}, dialect="postgres"
+    )
     assert "region" in out
     assert _parses(out, "postgres")
 

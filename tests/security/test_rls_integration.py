@@ -1,5 +1,6 @@
 # tests/security/test_rls_integration.py
 """End-to-end tests using real SQLite + in-process mock RLSClient."""
+
 import asyncio
 import sqlite3
 import pytest
@@ -16,10 +17,16 @@ def sqlite_ds(tmp_path):
     """Minimal datasource stub backed by a real in-memory SQLite."""
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.execute("CREATE TABLE orders (id INT, region TEXT, amount INT)")
-    conn.executemany("INSERT INTO orders VALUES (?, ?, ?)", [
-        (1, "华南", 100), (2, "华南", 200),
-        (3, "华北", 300), (4, "华北", 400), (5, "华北", 500),
-    ])
+    conn.executemany(
+        "INSERT INTO orders VALUES (?, ?, ?)",
+        [
+            (1, "华南", 100),
+            (2, "华南", 200),
+            (3, "华北", 300),
+            (4, "华北", 400),
+            (5, "华北", 500),
+        ],
+    )
     conn.commit()
 
     class FakeDS:
@@ -35,13 +42,18 @@ def sqlite_ds(tmp_path):
 @pytest.mark.asyncio
 async def test_enforce_filters_to_huanan(sqlite_ds):
     mock_client = AsyncMock()
-    mock_client.batch_fetch = AsyncMock(return_value=[
-        RLSRule(table="orders", allowed=True, predicate="region = '华南'")
-    ])
+    mock_client.batch_fetch = AsyncMock(
+        return_value=[
+            RLSRule(table="orders", allowed=True, predicate="region = '华南'")
+        ]
+    )
     principal = Principal(user_id="alice")
     executor = RLSAwareSQLExecutor(
-        datasource=sqlite_ds, rls_client=mock_client,
-        principal=principal, conversation_id="c1", rls_mode="enforce"
+        datasource=sqlite_ds,
+        rls_client=mock_client,
+        principal=principal,
+        conversation_id="c1",
+        rls_mode="enforce",
     )
     result = await executor.execute("SELECT * FROM orders")
     assert len(result.data) == 2
@@ -51,13 +63,18 @@ async def test_enforce_filters_to_huanan(sqlite_ds):
 @pytest.mark.asyncio
 async def test_shadow_returns_all_rows(sqlite_ds):
     mock_client = AsyncMock()
-    mock_client.batch_fetch = AsyncMock(return_value=[
-        RLSRule(table="orders", allowed=True, predicate="region = '华南'")
-    ])
+    mock_client.batch_fetch = AsyncMock(
+        return_value=[
+            RLSRule(table="orders", allowed=True, predicate="region = '华南'")
+        ]
+    )
     principal = Principal(user_id="alice")
     executor = RLSAwareSQLExecutor(
-        datasource=sqlite_ds, rls_client=mock_client,
-        principal=principal, conversation_id="c1", rls_mode="shadow"
+        datasource=sqlite_ds,
+        rls_client=mock_client,
+        principal=principal,
+        conversation_id="c1",
+        rls_mode="shadow",
     )
     result = await executor.execute("SELECT * FROM orders")
     # shadow: original sql executed, all 5 rows returned
@@ -68,10 +85,14 @@ async def test_shadow_returns_all_rows(sqlite_ds):
 @pytest.mark.asyncio
 async def test_off_returns_all_rows(sqlite_ds):
     from dbgpt_app.security.stub_rls_client import StubRLSClient
+
     principal = Principal(user_id="alice")
     executor = RLSAwareSQLExecutor(
-        datasource=sqlite_ds, rls_client=StubRLSClient(),
-        principal=principal, conversation_id="c1", rls_mode="off"
+        datasource=sqlite_ds,
+        rls_client=StubRLSClient(),
+        principal=principal,
+        conversation_id="c1",
+        rls_mode="off",
     )
     result = await executor.execute("SELECT * FROM orders")
     assert len(result.data) == 5
@@ -81,13 +102,18 @@ async def test_off_returns_all_rows(sqlite_ds):
 @pytest.mark.asyncio
 async def test_snapshot_recorded(sqlite_ds):
     mock_client = AsyncMock()
-    mock_client.batch_fetch = AsyncMock(return_value=[
-        RLSRule(table="orders", allowed=True, predicate="region = '华南'")
-    ])
+    mock_client.batch_fetch = AsyncMock(
+        return_value=[
+            RLSRule(table="orders", allowed=True, predicate="region = '华南'")
+        ]
+    )
     principal = Principal(user_id="alice")
     executor = RLSAwareSQLExecutor(
-        datasource=sqlite_ds, rls_client=mock_client,
-        principal=principal, conversation_id="c1", rls_mode="enforce"
+        datasource=sqlite_ds,
+        rls_client=mock_client,
+        principal=principal,
+        conversation_id="c1",
+        rls_mode="enforce",
     )
     result = await executor.execute("SELECT * FROM orders")
     assert result.rls_snapshot == {"orders": "region = '华南'"}

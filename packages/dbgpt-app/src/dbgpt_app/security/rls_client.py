@@ -53,10 +53,10 @@ logger = logging.getLogger(__name__)
 class RLSTableRef:
     """标识一张目标表，作为缓存键与上游请求的基本单元。"""
 
-    datasource: str   # DB-GPT 数据源名称
-    schema: str       # 数据库 schema 名
-    table: str        # 表名（不含 schema 前缀）
-    alias: str = ""   # SQL 里该表的别名，仅在注入谓词时使用，不参与缓存键
+    datasource: str  # DB-GPT 数据源名称
+    schema: str  # 数据库 schema 名
+    table: str  # 表名（不含 schema 前缀）
+    alias: str = ""  # SQL 里该表的别名，仅在注入谓词时使用，不参与缓存键
 
 
 @dataclass
@@ -122,6 +122,7 @@ class RLSClient:
     def from_user_service(cls, system_app) -> "RLSClient":
         """从 SystemApp 取 UserServiceClient 单例构造 RLSClient。"""
         from dbgpt_app.microservice.user_service import UserServiceClient
+
         user_service = system_app.get_component(
             UserServiceClient.name, UserServiceClient
         )
@@ -180,7 +181,8 @@ class RLSClient:
                 if cache_key in self._stale_cache:
                     logger.warning(
                         "RLS upstream unavailable, using stale cache for table=%s err=%s",
-                        ref.table, exc,
+                        ref.table,
+                        exc,
                     )
                     results.append(self._stale_cache[cache_key])
                 else:
@@ -241,7 +243,9 @@ class RLSClient:
         prefix = f"{user_id}:{sys_code}:"
         if table:
             prefix += table
-        keys_to_delete = [k for k in list(self._l1_cache.keys()) if str(k).startswith(prefix)]
+        keys_to_delete = [
+            k for k in list(self._l1_cache.keys()) if str(k).startswith(prefix)
+        ]
         for k in keys_to_delete:
             self._l1_cache.pop(k, None)
             self._stale_cache.pop(k, None)
