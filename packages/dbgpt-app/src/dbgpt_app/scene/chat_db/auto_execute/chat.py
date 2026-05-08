@@ -131,4 +131,68 @@ class ChatWithDbAutoExecute(BaseChat):
 
     def do_action(self, prompt_response):
         print(f"do_action:{prompt_response}")
-        return self.database.run_to_df
+        return self._make_rls_runner()
+
+    def _make_rls_runner(self):
+        """返回一个同步 callable(sql) -> DataFrame，内部经过 RLSAwareSQLExecutor。"""
+        import asyncio
+
+        from dbgpt_app.security.config import RLSConfig
+        from dbgpt_app.security.principal import current_principal
+        from dbgpt_app.security.rls_client import RLSClient
+        from dbgpt_app.security.rls_executor import RLSAwareSQLExecutor
+        from dbgpt_app.security.stub_rls_client import StubRLSClient
+
+        # 1. 取 RLSClient（已注册到 SystemApp；mode=off 时是 StubRLSClient）
+        try:
+            rls_client = self.system_app.get_component(
+                RLSClient.__name__, RLSClient, default_component=None
+            )
+        except Exception:
+            rls_client = None
+        if rls_client is None:
+            try:
+                rls_client = self.system_app.get_component(
+                    StubRLSClient.__name__, StubRLSClient, default_component=None
+                )
+            except Exception:
+                rls_client = None
+        if rls_client is None:
+            rls_client = StubRLSClient()
+
+        # 2. 取 RLSConfig
+        try:
+            cfg = self.system_app.get_component(
+                RLSConfig.__name__, RLSConfig, default_component=None
+            )
+        except Exception:
+            cfg = None
+        if cfg is None:
+            cfg = RLSConfig()
+
+        # 3. Principal: 优先 contextvar，回退 chat_param
+        principal = current_principal(chat_param=self.chat_param)
+
+        executor = RLSAwareSQLExecutor(
+            datasource=self.database,
+            rls_client=rls_client,
+            principal=principal,
+            conversation_id=self.chat_session_id,
+            rls_mode=cfg.mode,
+            fail_strategy=cfg.fail_strategy,
+        )
+
+        def runner(sql: str):
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            if loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(executor.execute(sql), loop)
+                result = future.result(timeout=30)
+            else:
+                result = loop.run_until_complete(executor.execute(sql))
+            return result.data
+
+        return runner

@@ -68,6 +68,7 @@ def initialize_components(
     # Initialize prompt templates - MUST be after serve apps registration
     _initialize_prompt_templates()
     _initialize_benchmark_data(system_app)
+    _initialize_rls(system_app, param)
 
 
 def _initialize_model_cache(system_app: SystemApp, web_config: ServiceWebParameters):
@@ -233,3 +234,47 @@ def _initialize_benchmark_data(system_app: SystemApp):
     )
 
     initialize_benchmark_data(system_app)
+
+
+def _initialize_rls(system_app: SystemApp, param):
+    """Register RLSClient (or StubRLSClient for mode=off) into SystemApp."""
+    from dbgpt_app.security.config import RLSConfig
+    from dbgpt_app.security.rls_client import RLSClient
+    from dbgpt_app.security.stub_rls_client import StubRLSClient
+
+    # Read from serve.rls section; default to mode=off if missing
+    rls_cfg_dict = getattr(getattr(param, "serve", None), "rls", None)
+    if rls_cfg_dict:
+        cfg = (
+            RLSConfig(**rls_cfg_dict)
+            if isinstance(rls_cfg_dict, dict)
+            else rls_cfg_dict
+        )
+    else:
+        cfg = RLSConfig()
+
+    system_app.register_instance(cfg)
+
+    if cfg.mode == "off":
+        system_app.register_instance(StubRLSClient())
+    else:
+        # 使用已注册的 UserServiceClient（Nacos 服务发现 + getSqlFragmentByUserId）
+        try:
+            from dbgpt_app.microservice.user_service import UserServiceClient
+
+            user_service = system_app.get_component(
+                UserServiceClient.name, UserServiceClient
+            )
+            rls_client = RLSClient(
+                user_service=user_service,
+                local_ttl_seconds=cfg.local_ttl_seconds,
+                stale_fallback_seconds=cfg.stale_fallback_seconds,
+            )
+            system_app.register_instance(rls_client)
+        except Exception as e:
+            logger.warning(
+                "Failed to initialize RLSClient with UserServiceClient, "
+                "falling back to StubRLSClient: %s",
+                e,
+            )
+            system_app.register_instance(StubRLSClient())
