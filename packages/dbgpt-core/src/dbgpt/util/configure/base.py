@@ -79,7 +79,17 @@ class PromptManagerConfigProvider(ConfigProvider):
         if not prompt_serve or not prompt_serve.prompt_manager:
             return None
         prompt_manager = prompt_serve.prompt_manager
-        value = prompt_manager.prefer_query(key, **kwargs)
+        try:
+            value = prompt_manager.prefer_query(key, **kwargs)
+        except Exception as exc:
+            logger.warning(
+                "Failed to query dynamic config from prompt manager, "
+                "fallback to default config. key=%s errType=%s err=%s",
+                key,
+                type(exc).__name__,
+                exc,
+            )
+            return None
         if not value:
             return None
         # Just return the first value

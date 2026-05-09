@@ -2,6 +2,7 @@ import { apiInterceptors } from '@/client/api';
 import { getBenchmarkResultDetail } from '@/client/api/models_evaluation/result';
 import { BarChart } from '@/components/models_evaluation/components/bar-chart';
 import { NavTo } from '@/components/models_evaluation/components/nav-to';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import { Button, Card, Col, Descriptions, Row, Spin, Statistic, Table, Tabs } from 'antd';
 import { useRouter } from 'next/router';
 import { useEffect, useState } from 'react';
@@ -57,7 +58,7 @@ const EvaluationDetail = () => {
                 type='link'
                 target='_blank'
                 rel='noopener noreferrer'
-                href={`${process.env.API_BASE_URL ?? ''}/api/v1/evaluate/benchmark_result_download?evaluate_code=${code}`}
+                href={`${process.env.API_BASE_URL || GATEWAY_API_BASE}/api/v1/evaluate/benchmark_result_download?evaluate_code=${code}`}
               >
                 {t('download_evaluation_result')}
               </Button>

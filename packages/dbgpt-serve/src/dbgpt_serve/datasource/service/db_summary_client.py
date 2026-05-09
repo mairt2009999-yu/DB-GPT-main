@@ -53,6 +53,7 @@ class DBSummaryClient:
         db_type: str,
         trigger: str = "unknown",
         force_refresh: bool = False,
+        raise_on_error: bool = True,
     ) -> None:
         """Put db profile and table profile summary into vector store."""
         start_time = time.perf_counter()
@@ -131,6 +132,23 @@ class DBSummaryClient:
         except Exception as e:
             elapsed_ms = int((time.perf_counter() - start_time) * 1000)
             trace = traceback.format_exc()
+            if not raise_on_error:
+                logger.warning(
+                    "%s SKIP_UNAVAILABLE trigger=%s db_name=%s db_type=%s "
+                    "elapsed_ms=%s error=%s",
+                    _LOG_PREFIX,
+                    trigger,
+                    dbname,
+                    db_type,
+                    elapsed_ms,
+                    str(e),
+                )
+                logger.debug(
+                    "%s SKIP_UNAVAILABLE traceback=%s",
+                    _LOG_PREFIX,
+                    trace,
+                )
+                return
             logger.error(
                 "%s FAILED trigger=%s db_name=%s db_type=%s elapsed_ms=%s "
                 "error=%s traceback=%s",
@@ -155,7 +173,8 @@ class DBSummaryClient:
             f"\n>>>>>>>> [DB Schema检索] 开始检索数据库向量库"
             f"\n>>>>>>>> 召回引擎: DBSchemaRetriever"
             f"\n>>>>>>>> 检索数据库: {dbname}"
-            f"\n>>>>>>>> 检索向量库: 表索引({dbname}_profile), 字段索引({dbname}_profile_field)"
+            f"\n>>>>>>>> 检索向量库: 表索引({dbname}_profile), "
+            f"字段索引({dbname}_profile_field)"
             f"\n>>>>>>>> 检索参数: top_k={topk}, query='{query[:120]}'"
             f"\n{'>'*60}"
         )
@@ -169,7 +188,9 @@ class DBSummaryClient:
             table_count = table_vector_connector._get_collection_safe().count()
             if table_count == 0:
                 logger.warning(
-                    f"Vector store '{dbname}_profile' is empty. Please vectorize the database."
+                    "Vector store '%s_profile' is empty. "
+                    "Please vectorize the database.",
+                    dbname,
                 )
         except Exception as _e:
             logger.warning(f"Failed to check vector store health: {_e}")
@@ -235,6 +256,7 @@ class DBSummaryClient:
                     item["db_name"],
                     item["db_type"],
                     trigger="serve.datasource.init_db_summary",
+                    raise_on_error=False,
                 )
             except Exception as e:
                 trace = traceback.format_exc()
@@ -310,7 +332,7 @@ class DBSummaryClient:
             # 用新连接器重新检查是否存在数据
             table_vector_exists_before = table_vector_connector.vector_name_exists()
             field_vector_exists_before = field_vector_connector.vector_name_exists()
-            
+
             if table_vector_exists_before or field_vector_exists_before:
                 print(
                     f"[DBSchema向量化] 🔁 FORCE_REFRESH: 删除旧向量 | db={dbname}"
@@ -318,8 +340,13 @@ class DBSummaryClient:
                 logger.info(
                     "%s PERSIST_STATS trigger=%s db_name=%s db_type=%s status=%s "
                     "table_vector_name=%s field_vector_name=%s",
-                    _LOG_PREFIX, trigger, dbname, db_type,
-                    "FORCE_REFRESH_DELETE", vector_store_name, field_vector_store_name,
+                    _LOG_PREFIX,
+                    trigger,
+                    dbname,
+                    db_type,
+                    "FORCE_REFRESH_DELETE",
+                    vector_store_name,
+                    field_vector_store_name,
                 )
                 table_vector_connector.delete_vector_name(vector_store_name)
                 field_vector_connector.delete_vector_name(field_vector_store_name)
@@ -335,7 +362,8 @@ class DBSummaryClient:
 
         if not table_vector_exists_before:
             print(
-                f"[DBSchema向量化] ❌ 向量不存在 → 开始重新对数据库 Schema 进行向量化 | db={dbname}"
+                "[DBSchema向量化] ❌ 向量不存在 → "
+                f"开始重新对数据库 Schema 进行向量化 | db={dbname}"
             )
             from dbgpt_ext.rag.assembler.db_schema import DBSchemaAssembler
             from dbgpt_ext.rag.summary.rdbms_db_summary import _DEFAULT_COLUMN_SEPARATOR
@@ -446,7 +474,8 @@ class DBSummaryClient:
             )
         else:
             print(
-                f"[DBSchema向量化] ✅ SKIP: 向量已存在，跳过向量化 → 直接查询已有向量数据 | db={dbname}"
+                "[DBSchema向量化] ✅ SKIP: 向量已存在，"
+                f"跳过向量化 → 直接查询已有向量数据 | db={dbname}"
             )
             logger.info(
                 "%s PERSIST_STATS trigger=%s db_name=%s db_type=%s status=%s "

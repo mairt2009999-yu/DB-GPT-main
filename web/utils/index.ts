@@ -1,4 +1,5 @@
 import { format } from 'sql-formatter';
+import { GATEWAY_API_BASE } from './constants/gateway';
 
 /** Theme */
 export const STORAGE_THEME_KEY = '__db_gpt_theme_key';
@@ -42,9 +43,7 @@ export const transformFileUrl = (url: string): string => {
     const bucket = pathParts[0];
     const fileId = pathParts[1];
 
-    // Transform to service URL
-    // Using process.env.API_BASE_URL as the base
-    return `${process.env.API_BASE_URL || ''}/api/v2/serve/file/files/${bucket}/${fileId}${parsedUrl.search}`;
+    return `${process.env.API_BASE_URL || GATEWAY_API_BASE}/api/v2/serve/file/files/${bucket}/${fileId}${parsedUrl.search}`;
   } catch (e) {
     console.error('Error transforming file URL:', e);
     return url; // Return original URL if transformation fails

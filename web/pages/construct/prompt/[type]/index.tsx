@@ -10,8 +10,8 @@ import {
 import useUser from '@/hooks/use-user';
 import ModelIcon from '@/new-components/chat/content/ModelIcon';
 import { DebugParams, OperatePromptParams } from '@/types/prompt';
-import { getUserId } from '@/utils';
-import { HEADER_USER_ID_KEY } from '@/utils/constants/index';
+import { getGatewayAuthHeaders } from '@/utils/auth';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import { LeftOutlined } from '@ant-design/icons';
 import { EventStreamContentType, fetchEventSource } from '@microsoft/fetch-event-source';
 import JsonView from '@uiw/react-json-view';
@@ -251,12 +251,9 @@ const AddOrEditPrompt: React.FC = () => {
       const index = tempHistory.length - 1;
       try {
         setLlmLoading(true);
-        await fetchEventSource(`${process.env.API_BASE_URL ?? ''}/prompt/template/debug`, {
+        await fetchEventSource(`${process.env.API_BASE_URL || GATEWAY_API_BASE}/prompt/template/debug`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            [HEADER_USER_ID_KEY]: getUserId() ?? '',
-          },
+          headers: getGatewayAuthHeaders({ json: true, eventStream: true }),
           body: JSON.stringify(params),
           openWhenHidden: true,
           async onopen(response) {

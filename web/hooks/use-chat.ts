@@ -1,7 +1,7 @@
 import { ChatContext } from '@/app/chat-context';
 import i18n from '@/app/i18n';
-import { getUserId } from '@/utils';
-import { HEADER_USER_ID_KEY } from '@/utils/constants/index';
+import { getGatewayAuthHeaders } from '@/utils/auth';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import { EventStreamContentType, fetchEventSource } from '@microsoft/fetch-event-source';
 import { message } from 'antd';
 import { useCallback, useContext, useRef, useState } from 'react';
@@ -49,12 +49,9 @@ const useChat = ({ queryAgentURL = '/api/v1/chat/completions', app_code }: Props
       }
 
       try {
-        await fetchEventSource(`${process.env.API_BASE_URL ?? ''}${queryAgentURL}`, {
+        await fetchEventSource(`${process.env.API_BASE_URL || GATEWAY_API_BASE}${queryAgentURL}`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            [HEADER_USER_ID_KEY]: getUserId() ?? '',
-          },
+          headers: getGatewayAuthHeaders({ json: true, eventStream: true }),
           body: JSON.stringify(params),
           signal: ctrl ? ctrl.signal : null,
           openWhenHidden: true,

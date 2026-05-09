@@ -1,8 +1,8 @@
 """rls_parser.py —— RLSAwareSQLExecutor 的 Step 1：解析 SQL 并收集表清单。
 
-将 LLM 生成的 SQL 字符串解析为 sqlglot AST，并把其中所有真实表（排除 CTE 名）
-收集为 ``RLSTableRef`` 列表，供后续 ``rls_client.batch_fetch`` 与 ``rls_injector.inject``
-使用。
+将 LLM 生成的 SQL 字符串解析为 sqlglot AST，并把其中所有真实表
+（排除 CTE 名）收集为 ``RLSTableRef`` 列表，供后续
+``rls_client.batch_fetch`` 与 ``rls_injector.inject`` 使用。
 
 注意
 ----
@@ -26,6 +26,22 @@ _SUPPORTED_DIALECTS = {"mysql", "postgres", "sqlite"}
 def is_supported_dialect(dialect: str) -> bool:
     """判断给定方言名称是否在 v1 支持范围内。"""
     return (dialect or "").lower() in _SUPPORTED_DIALECTS
+
+
+def _is_read_only_query_expression(tree: exp.Expression) -> bool:
+    """Return True for SELECT trees and set operations composed only of SELECTs."""
+    if isinstance(tree, exp.Select):
+        return True
+    if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
+        left = tree.args.get("this")
+        right = tree.args.get("expression")
+        return (
+            isinstance(left, exp.Expression)
+            and isinstance(right, exp.Expression)
+            and _is_read_only_query_expression(left)
+            and _is_read_only_query_expression(right)
+        )
+    return False
 
 
 def parse_and_collect(
@@ -61,8 +77,10 @@ def parse_and_collect(
     except Exception as exc:  # pragma: no cover - sqlglot raises various types
         raise RLSSQLParseError(f"sqlglot parse failed: {exc}") from exc
 
-    if tree is None or not isinstance(tree, exp.Select):
-        raise RLSUnsupportedSQLError("Only SELECT statements are supported in v1")
+    if tree is None or not _is_read_only_query_expression(tree):
+        raise RLSUnsupportedSQLError(
+            "Only read-only SELECT query expressions are supported in v1"
+        )
 
     # 1. 收集 CTE 名（排除）
     cte_names: Set[str] = set()

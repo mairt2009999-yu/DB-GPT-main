@@ -1,6 +1,8 @@
 /* eslint-disable react-hooks/rules-of-hooks */
 import { metadataBatch } from '@/client/api';
 import { IFlowNodeParameter } from '@/types/flow';
+import { getGatewayAuthHeaders } from '@/utils/auth';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import { convertKeysToCamelCase } from '@/utils/flow';
 import { UploadOutlined } from '@ant-design/icons';
 import type { UploadFile, UploadProps } from 'antd';
@@ -77,10 +79,8 @@ export const renderUpload = (params: Props) => {
 
   const props: UploadProps = {
     name: 'files',
-    action: process.env.API_BASE_URL ?? '' + data.ui.action,
-    headers: {
-      authorization: 'authorization-text',
-    },
+    action: `${process.env.API_BASE_URL || GATEWAY_API_BASE}${data.ui.action}`,
+    headers: getGatewayAuthHeaders(),
     defaultFileList: fileList,
     onChange(info) {
       setUploading(true);

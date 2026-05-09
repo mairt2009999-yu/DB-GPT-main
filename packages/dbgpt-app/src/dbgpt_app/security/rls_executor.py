@@ -47,13 +47,18 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict
+
+from sqlalchemy.exc import DBAPIError, OperationalError
+
+from dbgpt_app.security.exceptions import PermissionDeniedError, RLSSQLParseError
 
 if TYPE_CHECKING:
     from dbgpt_app.security.principal import Principal
     from dbgpt_app.security.rls_client import RLSClient
 
 logger = logging.getLogger(__name__)
+RLS_LOG_PREFIX = ">>>>>>>>>>> [SQL拦截/RLS]"
 
 
 # ---------------------------------------------------------------------------
@@ -77,14 +82,6 @@ class SQLExecutionResult:
     rewritten_sql: str
     rls_snapshot: Dict[str, str]
     rls_mode: str
-
-
-from dbgpt_app.security.exceptions import (
-    PermissionDeniedError,
-    RLSSQLParseError,
-    RLSUpstreamUnavailableError,
-    RLSUnsupportedSQLError,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +135,19 @@ class RLSAwareSQLExecutor:
         self._conversation_id = conversation_id
         self._rls_mode = rls_mode
         self._fail_strategy = fail_strategy
+        logger.info(
+            "%s 初始化 SQL 拦截器 | conv=%s mode=%s failStrategy=%s "
+            "datasource=%s dbType=%s userId=%s roles=%s sysCode=%s",
+            RLS_LOG_PREFIX,
+            self._conversation_id,
+            self._rls_mode,
+            self._fail_strategy,
+            self._get_datasource_name(),
+            getattr(self._datasource, "db_type", None),
+            getattr(self._principal, "user_id", None),
+            getattr(self._principal, "roles", None),
+            getattr(self._principal, "sys_code", None),
+        )
 
     # ------------------------------------------------------------------
     # 对外唯一入口
@@ -163,10 +173,26 @@ class RLSAwareSQLExecutor:
             RLSSQLParseError:             SQL 无法被 sqlglot 解析（fail-close）。
             RLSUpstreamUnavailableError:  上游不可用且无 stale 缓存（fail-close）。
         """
+        logger.info(
+            "%s 进入 SQL 拦截执行入口 | conv=%s mode=%s timeout=%s 执行前原始SQL=%s",
+            RLS_LOG_PREFIX,
+            self._conversation_id,
+            self._rls_mode,
+            timeout_seconds,
+            sql,
+        )
         if self._rls_mode == "off":
             return await self._execute_bypass(sql, timeout_seconds)
 
         rewritten_sql, rls_snapshot = await self._rewrite(sql)
+        logger.info(
+            "%s SQL 改写完成 | conv=%s mode=%s 改写后SQL=%s rlsSnapshot=%s",
+            RLS_LOG_PREFIX,
+            self._conversation_id,
+            self._rls_mode,
+            rewritten_sql,
+            rls_snapshot,
+        )
 
         if self._rls_mode == "shadow":
             # shadow 模式：记录改写结果但实际执行原 SQL
@@ -180,6 +206,12 @@ class RLSAwareSQLExecutor:
             data = await self._run_sql(sql, timeout_seconds)
         else:
             # enforce 模式：执行改写后的 SQL
+            logger.info(
+                "%s enforce模式准备执行改写后SQL | conv=%s 数据库执行前SQL=%s",
+                RLS_LOG_PREFIX,
+                self._conversation_id,
+                rewritten_sql,
+            )
             data = await self._run_sql(rewritten_sql, timeout_seconds)
 
         # 审计落库（异步，失败只记 warning，不影响用户结果）
@@ -202,19 +234,75 @@ class RLSAwareSQLExecutor:
 
         # Step 1: 解析 SQL
         dialect = self._get_dialect()
+        logger.info(
+            "%s Step1 解析执行前SQL | conv=%s dialect=%s datasource=%s "
+            "执行前原始SQL=%s",
+            RLS_LOG_PREFIX,
+            self._conversation_id,
+            dialect,
+            self._get_datasource_name(),
+            sql,
+        )
         tree, tables = self._parse_and_collect_tables(sql, dialect)
+        logger.info(
+            "%s Step1 收集SQL涉及表 | conv=%s tables=%s",
+            RLS_LOG_PREFIX,
+            self._conversation_id,
+            [
+                {
+                    "datasource": ref.datasource,
+                    "schema": ref.schema,
+                    "table": ref.table,
+                    "alias": ref.alias,
+                    "columns": list(ref.columns),
+                }
+                for ref in tables
+            ],
+        )
 
         # Step 2: 批量查谓词
+        logger.info(
+            "%s Step2 拉取行级权限规则 | conv=%s userId=%s tableCount=%s",
+            RLS_LOG_PREFIX,
+            self._conversation_id,
+            getattr(self._principal, "user_id", None),
+            len(tables),
+        )
         rules = await self._rls_client.batch_fetch(self._principal, tables)
+        logger.info(
+            "%s Step2 行级权限规则返回 | conv=%s rules=%s",
+            RLS_LOG_PREFIX,
+            self._conversation_id,
+            [
+                {
+                    "table": rule.table,
+                    "allowed": rule.allowed,
+                    "predicate": rule.predicate,
+                }
+                for rule in rules
+            ],
+        )
 
         # 检查 allowed=False
         for rule in rules:
             if not rule.allowed:
+                logger.warning(
+                    "%s permission denied | conv=%s table=%s userId=%s",
+                    RLS_LOG_PREFIX,
+                    self._conversation_id,
+                    rule.table,
+                    getattr(self._principal, "user_id", None),
+                )
                 raise PermissionDeniedError(
                     f"当前用户无权访问表 [{rule.table}]，已拒绝执行"
                 )
 
         # Step 3: AST 注入（委托 rls_injector.inject）
+        logger.info(
+            "%s Step3 注入RLS谓词 | conv=%s",
+            RLS_LOG_PREFIX,
+            self._conversation_id,
+        )
         rewritten_sql, rls_snapshot = rls_injector.inject(tree, tables, rules, dialect)
 
         return rewritten_sql, rls_snapshot
@@ -223,12 +311,97 @@ class RLSAwareSQLExecutor:
         """Step 1：用 sqlglot 解析 SQL，返回 (AST tree, tables)。"""
         from dbgpt_app.security import rls_parser
 
-        return rls_parser.parse_and_collect(
-            sql, dialect, datasource=self._datasource.db_name
+        default_schema = self._resolve_default_schema(dialect)
+        tree, tables = rls_parser.parse_and_collect(
+            sql,
+            dialect,
+            datasource=self._get_datasource_name(),
+            default_schema=default_schema,
         )
+        return tree, self._enrich_table_columns(tables)
+
+    def _enrich_table_columns(self, tables):
+        """Attach datasource column metadata to table refs when it is available."""
+        for ref in tables:
+            columns = self._get_table_column_names(ref)
+            if columns:
+                ref.columns = columns
+        return tables
+
+    def _get_table_column_names(self, ref) -> tuple[str, ...]:
+        raw_columns = self._read_columns_from_inspector(ref)
+        columns = self._normalize_column_names(raw_columns)
+        if columns:
+            return columns
+
+        raw_columns = self._read_columns_from_datasource(ref)
+        return self._normalize_column_names(raw_columns)
+
+    def _read_columns_from_datasource(self, ref):
+        get_columns = getattr(self._datasource, "get_columns", None)
+        if not callable(get_columns):
+            return None
+        try:
+            return get_columns(ref.table)
+        except Exception as exc:
+            logger.debug(
+                "%s datasource get_columns failed | conv=%s table=%s schema=%s "
+                "errType=%s err=%s",
+                RLS_LOG_PREFIX,
+                self._conversation_id,
+                ref.table,
+                ref.schema,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
+    def _read_columns_from_inspector(self, ref):
+        inspector = getattr(self._datasource, "_inspector", None)
+        get_columns = getattr(inspector, "get_columns", None)
+        if not callable(get_columns):
+            return None
+        try:
+            if ref.schema:
+                return get_columns(ref.table, schema=ref.schema)
+            return get_columns(ref.table)
+        except Exception as exc:
+            logger.debug(
+                "%s inspector get_columns failed | conv=%s table=%s schema=%s "
+                "errType=%s err=%s",
+                RLS_LOG_PREFIX,
+                self._conversation_id,
+                ref.table,
+                ref.schema,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
+    def _normalize_column_names(self, raw_columns) -> tuple[str, ...]:
+        if not isinstance(raw_columns, (list, tuple, set)):
+            return ()
+
+        names: list[str] = []
+        for column in raw_columns:
+            name = None
+            if isinstance(column, dict):
+                name = column.get("name")
+            else:
+                name = getattr(column, "name", None)
+            if isinstance(name, str) and name:
+                names.append(name)
+        return tuple(names)
 
     async def _run_sql(self, sql: str, timeout_seconds: float) -> Any:
         """Step 4：把 SQL 交给底层 datasource 执行，返回结果集。"""
+        logger.info(
+            "%s Step4 数据库执行前SQL | conv=%s timeout=%s sql=%s",
+            RLS_LOG_PREFIX,
+            self._conversation_id,
+            timeout_seconds,
+            sql,
+        )
         loop = asyncio.get_event_loop()
         return await asyncio.wait_for(
             loop.run_in_executor(None, self._datasource.run_to_df, sql),
@@ -259,6 +432,12 @@ class RLSAwareSQLExecutor:
         self, sql: str, timeout_seconds: float = 30
     ) -> SQLExecutionResult:
         """rls_mode=off 时的快速路径：直接执行，不改写，不审计。"""
+        logger.info(
+            "%s mode=off 跳过RLS改写直接执行 | conv=%s 数据库执行前SQL=%s",
+            RLS_LOG_PREFIX,
+            self._conversation_id,
+            sql,
+        )
         data = await self._run_sql(sql, timeout_seconds)
         return SQLExecutionResult(
             data=data,
@@ -269,4 +448,187 @@ class RLSAwareSQLExecutor:
 
     def _get_dialect(self) -> str:
         """从 datasource 配置获取 SQL 方言名称，用于 sqlglot 解析。"""
-        return self._datasource.db_type.lower()
+        raw_dialect = (
+            self._string_datasource_attr("db_dialect")
+            or self._string_datasource_attr("dialect")
+            or self._string_datasource_attr("db_type")
+        )
+        dialect = str(raw_dialect or "").lower()
+        aliases = {
+            "postgresql": "postgres",
+            "pgsql": "postgres",
+            "postgresql+psycopg2": "postgres",
+        }
+        return aliases.get(dialect, dialect)
+
+    def _string_datasource_attr(self, name: str) -> str:
+        value = getattr(self._datasource, name, None)
+        if isinstance(value, str):
+            return value
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                return ""
+            return value if isinstance(value, str) else ""
+        return ""
+
+    def _get_datasource_name(self) -> str:
+        """Return a stable datasource/database name without assuming db_name exists."""
+        db_name = self._string_datasource_attr("db_name")
+        if db_name:
+            return db_name
+
+        engine = getattr(self._datasource, "_engine", None)
+        engine_url = getattr(engine, "url", None)
+        engine_database = getattr(engine_url, "database", None)
+        if isinstance(engine_database, str) and engine_database:
+            return engine_database
+
+        getter = getattr(self._datasource, "get_current_db_name", None)
+        if callable(getter):
+            try:
+                current_db = getter()
+            except Exception as exc:
+                logger.warning(
+                    "%s datasource name fallback failed | conv=%s errType=%s err=%s",
+                    RLS_LOG_PREFIX,
+                    self._conversation_id,
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                if isinstance(current_db, str) and current_db:
+                    return current_db
+
+        return ""
+
+    def _get_default_schema(self) -> str:
+        """Return connector default schema for unqualified table names."""
+        return self._resolve_default_schema(self._get_dialect())
+
+    def _resolve_default_schema(self, dialect: str) -> str:
+        configured_schema = self._configured_default_schema()
+        if configured_schema:
+            logger.info(
+                "%s resolved default schema | conv=%s defaultSchema=%s "
+                "source=configured_schema",
+                RLS_LOG_PREFIX,
+                self._conversation_id,
+                configured_schema,
+            )
+            return configured_schema
+
+        if self._is_postgres_dialect(dialect):
+            getter = self._get_declared_datasource_callable("get_current_schema")
+            if getter is not None:
+                schema = self._get_postgres_current_schema_with_retry(getter)
+                logger.info(
+                    "%s resolved default schema | conv=%s defaultSchema=%s "
+                    "source=current_schema",
+                    RLS_LOG_PREFIX,
+                    self._conversation_id,
+                    schema,
+                )
+                return schema
+
+        logger.info(
+            "%s resolved default schema | conv=%s defaultSchema=%s source=%s",
+            RLS_LOG_PREFIX,
+            self._conversation_id,
+            "",
+            "none",
+        )
+        return ""
+
+    def _configured_default_schema(self) -> str:
+        return (
+            self._string_datasource_attr("_schema") or self._string_datasource_attr(
+                "schema"
+            )
+        )
+
+    def _get_postgres_current_schema_with_retry(self, getter) -> str:
+        last_error: BaseException | None = None
+        for attempt in range(2):
+            try:
+                schema = getter()
+            except (OperationalError, DBAPIError) as exc:
+                last_error = exc
+                logger.warning(
+                    "%s current_schema lookup failed | conv=%s attempt=%s "
+                    "errType=%s err=%s",
+                    RLS_LOG_PREFIX,
+                    self._conversation_id,
+                    attempt + 1,
+                    type(exc).__name__,
+                    exc,
+                )
+                if attempt == 0:
+                    self._dispose_datasource_engine()
+                    continue
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "%s current_schema lookup failed | conv=%s attempt=%s "
+                    "errType=%s err=%s",
+                    RLS_LOG_PREFIX,
+                    self._conversation_id,
+                    attempt + 1,
+                    type(exc).__name__,
+                    exc,
+                )
+                break
+            if isinstance(schema, str) and schema:
+                if attempt:
+                    logger.info(
+                        "%s current_schema lookup recovered after retry | conv=%s "
+                        "schema=%s",
+                        RLS_LOG_PREFIX,
+                        self._conversation_id,
+                        schema,
+                    )
+                return schema
+            last_error = ValueError(f"empty current schema: {schema!r}")
+            break
+
+        raise RLSSQLParseError(
+            "Unable to resolve PostgreSQL current schema for RLS enforcement"
+        ) from last_error
+
+    def _dispose_datasource_engine(self) -> None:
+        engine = getattr(self._datasource, "_engine", None)
+        dispose = getattr(engine, "dispose", None)
+        if not callable(dispose):
+            return
+        try:
+            dispose()
+            logger.warning(
+                "%s disposed datasource engine after current_schema failure | conv=%s",
+                RLS_LOG_PREFIX,
+                self._conversation_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "%s datasource engine dispose failed | conv=%s errType=%s err=%s",
+                RLS_LOG_PREFIX,
+                self._conversation_id,
+                type(exc).__name__,
+                exc,
+            )
+
+    def _get_declared_datasource_callable(self, name: str):
+        datasource_dict = getattr(self._datasource, "__dict__", {})
+        if isinstance(datasource_dict, dict) and name in datasource_dict:
+            value = getattr(self._datasource, name, None)
+            return value if callable(value) else None
+
+        class_value = getattr(type(self._datasource), name, None)
+        if not callable(class_value):
+            return None
+        value = getattr(self._datasource, name, None)
+        return value if callable(value) else None
+
+    def _is_postgres_dialect(self, dialect: str) -> bool:
+        return (dialect or "").lower() in {"postgres", "postgresql"}

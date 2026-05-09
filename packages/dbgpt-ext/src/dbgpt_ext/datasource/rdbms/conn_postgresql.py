@@ -19,6 +19,26 @@ from dbgpt.util.i18n_utils import _
 logger = logging.getLogger(__name__)
 
 
+def _with_schema_search_path(
+    engine_args: Optional[dict], schema: Optional[str]
+) -> dict:
+    args = dict(engine_args or {})
+    if not schema:
+        return args
+
+    connect_args = dict(args.get("connect_args") or {})
+    schema_option = f"-csearch_path={schema}"
+    existing_options = connect_args.get("options")
+    if isinstance(existing_options, str) and schema_option in existing_options.split():
+        return args
+    if existing_options:
+        connect_args["options"] = f"{existing_options} {schema_option}"
+    else:
+        connect_args["options"] = schema_option
+    args["connect_args"] = connect_args
+    return args
+
+
 @auto_register_resource(
     label=_("PostreSQL datasource"),
     category=ResourceCategory.DATABASE,
@@ -77,6 +97,7 @@ class PostgreSQLConnector(RDBMSConnector):
         db_url: str = (
             f"{cls.driver}://{quote(user)}:{urlquote(pwd)}@{host}:{str(port)}/{db_name}"
         )
+        engine_args = _with_schema_search_path(engine_args, kwargs.get("schema"))
         return cast(PostgreSQLConnector, cls.from_uri(db_url, engine_args, **kwargs))
 
     @classmethod
@@ -89,7 +110,9 @@ class PostgreSQLConnector(RDBMSConnector):
             parameters.password,
             parameters.database,
             schema=parameters.schema,
-            engine_args=parameters.engine_args(),
+            engine_args=_with_schema_search_path(
+                parameters.engine_args(), parameters.schema
+            ),
         )
 
     def _sync_tables_from_db(self) -> Iterable[str]:
@@ -284,6 +307,11 @@ class PostgreSQLConnector(RDBMSConnector):
         """Get current database name."""
         with self.session_scope() as session:
             return session.execute(text("SELECT current_database()")).scalar()
+
+    def get_current_schema(self) -> str:
+        """Get current schema used to resolve unqualified table names."""
+        with self.session_scope() as session:
+            return session.execute(text("SELECT current_schema()")).scalar()
 
     def table_simple_info(self):
         """Get table simple info."""

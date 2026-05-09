@@ -2,6 +2,8 @@ import { CodePreview } from '@/components/chat/chat-content/code-preview';
 import markdownComponents, { markdownPlugins, preprocessLaTeX } from '@/components/chat/chat-content/config';
 import AdvancedChart, { createChartConfig } from '@/new-components/charts';
 import MarkDownContext from '@/new-components/common/MarkdownContext';
+import { createGatewayFetchHeaders } from '@/utils/auth';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import {
   AppstoreOutlined,
   BarChartOutlined,
@@ -48,7 +50,7 @@ const resolveImageUrl = (src: string): string => {
   if (!src) return src;
   if (/^https?:\/\//.test(src)) return src;
   if (src.startsWith('/images/')) {
-    const base = process.env.API_BASE_URL || '';
+    const base = process.env.API_BASE_URL || GATEWAY_API_BASE;
     return base ? `${base}${src}` : src;
   }
   return src;
@@ -56,7 +58,7 @@ const resolveImageUrl = (src: string): string => {
 
 /** Replace `/images/...` references inside HTML content with full backend URLs */
 const resolveHtmlImageUrls = (html: string): string => {
-  const base = process.env.API_BASE_URL || '';
+  const base = process.env.API_BASE_URL || GATEWAY_API_BASE;
   if (!base || !html) return html;
   return html.replace(/(src\s*=\s*["'])\/images\//gi, `$1${base}/images/`);
 };
@@ -66,6 +68,25 @@ export interface ExecutionOutput {
   content: any;
   timestamp?: number;
 }
+
+type SqlExecutionMetadata = {
+  kind: 'sql_execution';
+  original_sql?: string;
+  rewritten_sql?: string;
+  rls_mode?: string;
+  rls_snapshot?: Record<string, string>;
+};
+
+const isSqlExecutionMetadata = (output: ExecutionOutput): boolean =>
+  output.output_type === 'json' &&
+  output.content &&
+  typeof output.content === 'object' &&
+  output.content.kind === 'sql_execution';
+
+const getSqlExecutionMetadata = (outputs: ExecutionOutput[]): SqlExecutionMetadata | null => {
+  const metadataOutput = outputs.find(isSqlExecutionMetadata);
+  return metadataOutput?.content || null;
+};
 
 export interface ActiveStepInfo {
   id: string;
@@ -1155,9 +1176,10 @@ const SkillCardRenderer: React.FC<{
     const fetchDetail = async () => {
       try {
         setLoading(true);
-        const base = process.env.API_BASE_URL || '';
+        const base = process.env.API_BASE_URL || GATEWAY_API_BASE;
         const res = await fetch(
           `${base}/api/v1/skills/detail?skill_name=${encodeURIComponent(skillName)}&file_path=${encodeURIComponent(skillName)}`,
+          { headers: createGatewayFetchHeaders() },
         );
         const json = await res.json();
         if (json.success && json.data) {
@@ -1184,10 +1206,11 @@ const SkillCardRenderer: React.FC<{
         return;
       }
       try {
-        const base = process.env.API_BASE_URL || '';
+        const base = process.env.API_BASE_URL || GATEWAY_API_BASE;
         const filePath = `${skillName}/${fileKey}`;
         const res = await fetch(
           `${base}/api/v1/skills/detail?skill_name=${encodeURIComponent(skillName)}&file_path=${encodeURIComponent(filePath)}`,
+          { headers: createGatewayFetchHeaders() },
         );
         const json = await res.json();
         if (json.success && json.data) {
@@ -1203,8 +1226,10 @@ const SkillCardRenderer: React.FC<{
   const handleDownload = useCallback(async () => {
     try {
       setDownloading(true);
-      const base = process.env.API_BASE_URL || '';
-      const res = await fetch(`${base}/api/v1/agent/skills/download?skill_name=${encodeURIComponent(skillName)}`);
+      const base = process.env.API_BASE_URL || GATEWAY_API_BASE;
+      const res = await fetch(`${base}/api/v1/agent/skills/download?skill_name=${encodeURIComponent(skillName)}`, {
+        headers: createGatewayFetchHeaders(),
+      });
       if (!res.ok) throw new Error('Download failed');
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -1451,7 +1476,7 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
   onRerun,
   onShare,
   terminalTitle,
-  onCollapse,
+  onCollapse: _onCollapse,
   artifacts,
   onArtifactClick,
   panelView: controlledPanelView,
@@ -1507,7 +1532,11 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
       setInternalPanelView(controlledPanelView);
     }
   }, [controlledPanelView]);
-  const visibleOutputs = useMemo(() => outputs.filter(o => o.output_type !== 'thought'), [outputs]);
+  const sqlExecutionMetadata = useMemo(() => getSqlExecutionMetadata(outputs), [outputs]);
+  const visibleOutputs = useMemo(
+    () => outputs.filter(o => o.output_type !== 'thought' && !isSqlExecutionMetadata(o)),
+    [outputs],
+  );
 
   const filteredArtifacts = useMemo(() => {
     if (!artifacts) return [];
@@ -1762,7 +1791,9 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
       <div
         className={classNames(
           'flex-1 overflow-y-auto flex flex-col min-h-0',
-          panelView === 'html-preview' || panelView === 'image-preview' || panelView === 'skill-preview' ? 'p-0' : 'p-5 space-y-4',
+          panelView === 'html-preview' || panelView === 'image-preview' || panelView === 'skill-preview'
+            ? 'p-0'
+            : 'p-5 space-y-4',
         )}
       >
         {panelView === 'skill-preview' && skillName ? (
@@ -1809,7 +1840,7 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
                 }
                 const obj = content as Record<string, any>;
                 if (obj?.file_path) {
-                  const base = process.env.API_BASE_URL || '';
+                  const base = process.env.API_BASE_URL || GATEWAY_API_BASE;
                   return `${base}/api/v1/agent/files/download?file_path=${encodeURIComponent(obj.file_path)}`;
                 }
                 return resolveImageUrl(obj?.url || obj?.src || String(content));
@@ -2021,17 +2052,24 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
                         (activeStep.action === 'sql_query' ||
                           (activeStep.detail && activeStep.detail.includes('Action: sql_query'))) &&
                         (() => {
-                          let sql = '';
+                          const originalSql = sqlExecutionMetadata?.original_sql || '';
+                          const rewrittenSql = sqlExecutionMetadata?.rewritten_sql || '';
+                          const displaySql = rewrittenSql || originalSql;
+                          const rlsMode = sqlExecutionMetadata?.rls_mode;
+                          const hasRlsRewrite =
+                            Boolean(originalSql && rewrittenSql) &&
+                            originalSql.trim().replace(/;$/, '') !== rewrittenSql.trim().replace(/;$/, '');
+                          let sql = displaySql;
                           if (activeStep.actionInput) {
                             try {
                               const parsed =
                                 typeof activeStep.actionInput === 'string'
                                   ? JSON.parse(activeStep.actionInput)
                                   : activeStep.actionInput;
-                              sql = parsed?.sql || '';
+                              sql = sql || parsed?.sql || '';
                             } catch {
                               const rawMatch = String(activeStep.actionInput).match(/"sql"\s*:\s*"([\s\S]*?)"/);
-                              if (rawMatch) sql = rawMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+                              if (!sql && rawMatch) sql = rawMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
                             }
                           }
 
@@ -2041,11 +2079,11 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
                             if (inputMatch) {
                               try {
                                 const parsed = JSON.parse(inputMatch[1]);
-                                sql = parsed.sql || '';
+                                sql = sql || parsed.sql || '';
                               } catch {
                                 // fallback: extract raw sql string
                                 const rawMatch = inputMatch[1].match(/"sql"\s*:\s*"([\s\S]*?)"/);
-                                if (rawMatch) sql = rawMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+                                if (!sql && rawMatch) sql = rawMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
                               }
                             }
                           }
@@ -2136,6 +2174,18 @@ const ManusRightPanel: React.FC<ManusRightPanelProps> = ({
                                   <span className='text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 font-medium'>
                                     READ ONLY
                                   </span>
+                                  {rlsMode && (
+                                    <span
+                                      className={classNames(
+                                        'text-[10px] px-1.5 py-0.5 rounded font-medium',
+                                        hasRlsRewrite
+                                          ? 'bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300'
+                                          : 'bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400',
+                                      )}
+                                    >
+                                      RLS {rlsMode.toUpperCase()}
+                                    </span>
+                                  )}
                                 </div>
                                 <Tooltip title='复制SQL'>
                                   <button

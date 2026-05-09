@@ -13,10 +13,17 @@ import ManusRightPanel, {
   PanelView,
 } from '@/new-components/chat/content/ManusRightPanel';
 import { MessagePart, ToolPart, ToolStatus } from '@/new-components/chat/content/OpenCodeSessionTurn';
+import {
+  GATEWAY_AUTH_CHANGE_EVENT,
+  clearGatewayTokens,
+  createGatewayFetchHeaders,
+  getGatewayAuthHeaders,
+  getGatewayUserInfo,
+  isGatewayAuthenticated,
+} from '@/utils/auth';
 import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import axios from '@/utils/ctx-axios';
 import { sendSpacePostRequest } from '@/utils/request';
-import { getUserId } from '@/utils/storage';
 import {
   ArrowUpOutlined,
   AudioOutlined,
@@ -34,6 +41,7 @@ import {
   FilePptOutlined,
   FileTextOutlined,
   LeftOutlined,
+  LogoutOutlined,
   PaperClipOutlined,
   PieChartOutlined,
   PlusOutlined,
@@ -596,6 +604,8 @@ const Playground: NextPage = () => {
   const [gatewayDataSources, setGatewayDataSources] = useState<DataSource[] | null>(null);
   const [gatewayKnowledgeSpaces, setGatewayKnowledgeSpaces] = useState<KnowledgeSpace[] | null>(null);
   const [gatewaySkillsList, setGatewaySkillsList] = useState<Skill[] | null>(null);
+  const [gatewayUserInfo, setGatewayUserInfo] = useState(() => getGatewayUserInfo());
+  const [_gatewayAuthenticated, setGatewayAuthenticated] = useState(() => isGatewayAuthenticated());
 
   const normalizeDataSources = (items: any[]): DataSource[] =>
     (items || []).map((item: any) => ({
@@ -694,7 +704,7 @@ const Playground: NextPage = () => {
   // Fetch Skills/DBGPTs list
   const { data: skillsList, loading: _loadingSkills } = useRequest(async () => {
     try {
-      const response: any = await axios.get(`${process.env.API_BASE_URL ?? ''}/api/v1/skills/list`);
+      const response: any = await axios.get('/api/v1/skills/list');
       // ctx-axios interceptor returns response.data directly
       if (response?.success && Array.isArray(response.data)) {
         return normalizeSkills(response.data);
@@ -711,12 +721,22 @@ const Playground: NextPage = () => {
   const effectiveSkillsList: Skill[] = gatewaySkillsList ?? skillsList ?? [];
 
   const getGatewayHeaders = (json = false): Record<string, string> => {
-    const headers: Record<string, string> = json ? { 'Content-Type': 'application/json' } : {};
-    const userId = getUserId();
-    if (userId) {
-      headers['X-User-Id'] = userId;
-    }
-    return headers;
+    return getGatewayAuthHeaders({ json });
+  };
+
+  useEffect(() => {
+    const syncAuth = () => {
+      setGatewayUserInfo(getGatewayUserInfo());
+      setGatewayAuthenticated(isGatewayAuthenticated());
+    };
+    syncAuth();
+    window.addEventListener(GATEWAY_AUTH_CHANGE_EVENT, syncAuth);
+    return () => window.removeEventListener(GATEWAY_AUTH_CHANGE_EVENT, syncAuth);
+  }, []);
+
+  const handleGatewayLogout = () => {
+    clearGatewayTokens();
+    message.success('已退出登录');
   };
 
   const unwrapApiResult = (response: any) => {
@@ -749,9 +769,7 @@ const Playground: NextPage = () => {
     formData.append('file', effectiveFile);
 
     try {
-      const uploadUrl = useGateway
-        ? `${GATEWAY_API_BASE}/api/v1/python/file/upload`
-        : `${process.env.API_BASE_URL ?? ''}/api/v1/python/file/upload`;
+      const uploadUrl = useGateway ? `${GATEWAY_API_BASE}/api/v1/python/file/upload` : `/api/v1/python/file/upload`;
       const uploadRes: any = await axios.post(uploadUrl, formData, {
         headers: useGateway ? getGatewayHeaders() : { 'Content-Type': 'multipart/form-data' },
       });
@@ -785,28 +803,52 @@ const Playground: NextPage = () => {
   const handleGatewayRefresh = async () => {
     if (gatewayLoading) return;
     setGatewayLoading(true);
+    const getGatewayRefreshError = (err: any, fallback: string) =>
+      err?.response?.data?.detail ||
+      err?.response?.data?.message ||
+      err?.response?.data?.err_msg ||
+      err?.message ||
+      fallback;
+
+    const applyResult = (
+      result: PromiseSettledResult<any>,
+      label: string,
+      onSuccess: (data: any) => void,
+      failures: string[],
+    ) => {
+      if (result.status === 'rejected') {
+        failures.push(`${label}: ${getGatewayRefreshError(result.reason, 'request failed')}`);
+        return;
+      }
+
+      const apiResult = unwrapApiResult(result.value);
+      if (!apiResult?.success) {
+        failures.push(`${label}: ${apiResult?.err_msg || apiResult?.message || 'request failed'}`);
+        return;
+      }
+
+      onSuccess(apiResult.data || []);
+    };
+
     try {
-      const [datasourceRes, knowledgeRes, skillsRes] = await Promise.all([
+      const [datasourceRes, knowledgeRes, skillsRes] = await Promise.allSettled([
         axios.get<any, any>(`${GATEWAY_API_BASE}/api/v2/serve/datasources`, { headers: getGatewayHeaders() }),
         axios.post<any, any>(`${GATEWAY_API_BASE}/knowledge/space/list`, {}, { headers: getGatewayHeaders(true) }),
         axios.get<any, any>(`${GATEWAY_API_BASE}/api/v1/skills/list`, { headers: getGatewayHeaders() }),
       ]);
+      const failures: string[] = [];
 
-      const datasourceResult = unwrapApiResult(datasourceRes);
-      const knowledgeResult = unwrapApiResult(knowledgeRes);
-      const skillsResult = unwrapApiResult(skillsRes);
+      applyResult(datasourceRes, 'Datasources', data => setGatewayDataSources(normalizeDataSources(data)), failures);
+      applyResult(knowledgeRes, 'Knowledge spaces', data => setGatewayKnowledgeSpaces(data), failures);
+      applyResult(skillsRes, 'Skills', data => setGatewaySkillsList(normalizeSkills(data)), failures);
 
-      if (!datasourceResult?.success) throw new Error(datasourceResult?.err_msg || 'Failed to load datasources');
-      if (!knowledgeResult?.success) throw new Error(knowledgeResult?.err_msg || 'Failed to load knowledge spaces');
-      if (!skillsResult?.success) throw new Error(skillsResult?.err_msg || 'Failed to load skills');
-
-      setGatewayDataSources(normalizeDataSources(datasourceResult.data || []));
-      setGatewayKnowledgeSpaces(knowledgeResult.data || []);
-      setGatewaySkillsList(normalizeSkills(skillsResult.data || []));
-      message.success('Gateway Refresh completed');
-    } catch (err: any) {
-      console.error('[Gateway Refresh] error:', err);
-      message.error(err?.message || 'Gateway Refresh failed');
+      if (failures.length === 0) {
+        message.success('Gateway Refresh completed');
+      } else if (failures.length === 3) {
+        message.error(`Gateway Refresh failed: ${failures.join('; ')}`);
+      } else {
+        message.warning(`Gateway Refresh partially completed: ${failures.join('; ')}`);
+      }
     } finally {
       setGatewayLoading(false);
     }
@@ -851,7 +893,7 @@ const Playground: NextPage = () => {
       setFilePreviewLoading(true);
       setFilePreviewError(null);
       try {
-        const res = await axios.post(`${process.env.API_BASE_URL ?? ''}/api/v1/resource/file/read`, null, {
+        const res = await axios.post('/api/v1/resource/file/read', null, {
           params: {
             conv_uid: conversationId || 'preview',
             file_key: uploadedFilePath,
@@ -1206,9 +1248,9 @@ const Playground: NextPage = () => {
           typeof artifact.content === 'string'
             ? artifact.content
             : artifact.content?.url || artifact.content?.src || String(artifact.content);
-        const resolvedUrl = imgUrl.startsWith('/images/') ? `${process.env.API_BASE_URL || ''}${imgUrl}` : imgUrl;
+        const resolvedUrl = imgUrl.startsWith('/images/') ? `${GATEWAY_API_BASE}${imgUrl}` : imgUrl;
         try {
-          const resp = await fetch(resolvedUrl);
+          const resp = await fetch(resolvedUrl, { headers: createGatewayFetchHeaders() });
           const blob = await resp.blob();
           const filename = artifact.name || imgUrl.split('/').pop() || 'image.png';
           triggerBlobDownload(blob, filename);
@@ -1258,9 +1300,9 @@ const Playground: NextPage = () => {
         const filePath = artifact.content?.file_path || artifact.content?.path || (artifact as any).filePath;
         if (filePath && filePath.includes('/images/')) {
           const imgName = filePath.split('/').pop();
-          const resolvedUrl = `${process.env.API_BASE_URL || ''}/images/${imgName}`;
+          const resolvedUrl = `${GATEWAY_API_BASE}/images/${imgName}`;
           try {
-            const resp = await fetch(resolvedUrl);
+            const resp = await fetch(resolvedUrl, { headers: createGatewayFetchHeaders() });
             const blob = await resp.blob();
             triggerBlobDownload(blob, artifact.name || imgName || 'file');
           } catch {
@@ -1268,9 +1310,9 @@ const Playground: NextPage = () => {
           }
         } else if (filePath) {
           // Download via backend file download endpoint (for agent-created files)
-          const downloadUrl = `${process.env.API_BASE_URL || ''}/api/v1/agent/files/download?file_path=${encodeURIComponent(filePath)}`;
+          const downloadUrl = `${GATEWAY_API_BASE}/api/v1/agent/files/download?file_path=${encodeURIComponent(filePath)}`;
           try {
-            const resp = await fetch(downloadUrl);
+            const resp = await fetch(downloadUrl, { headers: createGatewayFetchHeaders() });
             if (!resp.ok) {
               const errData = await resp.json().catch(() => ({}));
               message.warning(errData.detail || '文件暂不可下载');
@@ -1563,12 +1605,10 @@ const Playground: NextPage = () => {
 
     try {
       const response = await fetch(
-        useGateway
-          ? `${GATEWAY_API_BASE}/api/v1/chat/completions`
-          : `${process.env.API_BASE_URL ?? ''}/api/v1/chat/completions`,
+        useGateway ? `${GATEWAY_API_BASE}/api/v1/chat/completions` : `${GATEWAY_API_BASE}/api/v1/chat/completions`,
         {
           method: 'POST',
-          headers: useGateway ? getGatewayHeaders(true) : { 'Content-Type': 'application/json' },
+          headers: createGatewayFetchHeaders(undefined, { json: true, eventStream: true }),
           body: JSON.stringify({
             conv_uid: currentConvId,
             chat_mode: 'chat_with_db_execute',
@@ -1745,12 +1785,10 @@ const Playground: NextPage = () => {
 
     try {
       const response = await fetch(
-        useGateway
-          ? `${GATEWAY_API_BASE}/api/v1/chat/react-agent`
-          : `${process.env.API_BASE_URL ?? ''}/api/v1/chat/react-agent`,
+        useGateway ? `${GATEWAY_API_BASE}/api/v1/chat/react-agent` : `${GATEWAY_API_BASE}/api/v1/chat/react-agent`,
         {
           method: 'POST',
-          headers: useGateway ? getGatewayHeaders(true) : { 'Content-Type': 'application/json' },
+          headers: createGatewayFetchHeaders(undefined, { json: true, eventStream: true }),
           body: JSON.stringify({
             conv_uid: currentConvId,
             chat_mode: chatMode,
@@ -2485,7 +2523,24 @@ const Playground: NextPage = () => {
               <div className='flex items-center gap-2 bg-gray-100 dark:bg-gray-800 px-3 py-1 rounded-full text-xs font-medium'>
                 <ThunderboltOutlined className='text-yellow-500' /> <span>300</span>
               </div>
-              <Avatar size='small' icon={<UserOutlined />} className='bg-blue-500' />
+              <div className='flex items-center gap-2 bg-gray-100 dark:bg-gray-800 px-2.5 py-1 rounded-full text-xs font-medium'>
+                <Avatar size='small' icon={<UserOutlined />} className='bg-blue-500' />
+                <span className='max-w-[120px] truncate text-gray-700 dark:text-gray-200'>
+                  {gatewayUserInfo?.name || gatewayUserInfo?.loginName || 'Gateway User'}
+                </span>
+                {gatewayUserInfo?.roles?.length ? (
+                  <span className='text-gray-400'>{gatewayUserInfo.roles.join(',')}</span>
+                ) : null}
+              </div>
+              <Tooltip title='退出 gateway 登录'>
+                <Button
+                  type='text'
+                  size='small'
+                  icon={<LogoutOutlined />}
+                  onClick={handleGatewayLogout}
+                  className='text-gray-500 hover:text-red-500'
+                />
+              </Tooltip>
             </div>
           </div>
 
@@ -2617,9 +2672,9 @@ const Playground: NextPage = () => {
                         }}
                         onSkillDownload={async skillName => {
                           try {
-                            const base = process.env.API_BASE_URL || '';
                             const res = await fetch(
-                              `${base}/api/v1/agent/skills/download?skill_name=${encodeURIComponent(skillName)}`,
+                              `${GATEWAY_API_BASE}/api/v1/agent/skills/download?skill_name=${encodeURIComponent(skillName)}`,
+                              { headers: createGatewayFetchHeaders() },
                             );
                             if (!res.ok) throw new Error('Download failed');
                             const blob = await res.blob();

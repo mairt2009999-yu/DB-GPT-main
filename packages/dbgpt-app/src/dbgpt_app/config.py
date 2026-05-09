@@ -12,6 +12,7 @@ from dbgpt.util.i18n_utils import _
 from dbgpt.util.parameter_utils import BaseParameters
 from dbgpt.util.tracer import TracerParameters
 from dbgpt.util.utils import LoggingParameters
+from dbgpt_app.security.config import RLSConfig
 from dbgpt_ext.datasource.rdbms.conn_sqlite import SQLiteConnectorParameters
 from dbgpt_ext.storage.graph_store.tugraph_store import TuGraphStoreConfig
 from dbgpt_ext.storage.vector_store.chroma_store import ChromaVectorConfig
@@ -319,6 +320,10 @@ class ServiceWebParameters(BaseParameters):
     nacos: "NacosClientConfig" = field(
         default_factory=lambda: NacosClientConfig(),
         metadata={"help": _("Nacos naming integration config")},
+    )
+    rls: RLSConfig = field(
+        default_factory=RLSConfig,
+        metadata={"help": _("Row-level security config")},
     )
     remote_services: "RemoteServicesConfig" = field(
         default_factory=lambda: RemoteServicesConfig(),

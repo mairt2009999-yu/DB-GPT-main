@@ -1,7 +1,7 @@
 import { apiInterceptors, clearChatHistory } from '@/client/api';
 import { ChatHistoryResponse } from '@/types/chat';
-import { getUserId } from '@/utils';
-import { HEADER_USER_ID_KEY } from '@/utils/constants/index';
+import { getGatewayAuthHeaders } from '@/utils/auth';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import { ClearOutlined, LoadingOutlined, PauseCircleOutlined, RedoOutlined, SendOutlined } from '@ant-design/icons';
 import { EventStreamContentType, fetchEventSource } from '@microsoft/fetch-event-source';
 import { useRequest } from 'ahooks';
@@ -82,12 +82,9 @@ const InputContainer: React.FC = () => {
     setHistory([...history, ...tempHistory]);
     setCanNewChat(false);
     try {
-      await fetchEventSource(`${process.env.API_BASE_URL ?? ''}/api/v1/chat/completions`, {
+      await fetchEventSource(`${process.env.API_BASE_URL || GATEWAY_API_BASE}/api/v1/chat/completions`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          [HEADER_USER_ID_KEY]: getUserId() ?? '',
-        },
+        headers: getGatewayAuthHeaders({ json: true, eventStream: true }),
         signal: ctrl.current.signal,
         body: JSON.stringify(params),
         openWhenHidden: true,

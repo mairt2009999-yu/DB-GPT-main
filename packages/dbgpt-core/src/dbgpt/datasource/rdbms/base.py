@@ -142,6 +142,8 @@ class RDBMSConnector(BaseConnector):
         self._is_closed = False
         self._engine = engine
         self._schema = schema
+        self._db_sessions = None
+        self._sessions = weakref.WeakSet()
         if include_tables and ignore_tables:
             raise ValueError("Cannot specify both include_tables and ignore_tables")
 
@@ -152,7 +154,6 @@ class RDBMSConnector(BaseConnector):
         session_factory = sessionmaker(bind=engine)
         Session_Manages = scoped_session(session_factory)
         self._db_sessions = Session_Manages
-        self._sessions = weakref.WeakSet()
 
         self.view_support = view_support
         self._usable_tables: Set[str] = set()
@@ -362,7 +363,8 @@ class RDBMSConnector(BaseConnector):
                     f"\n>>>>>>>> [DDL异常] 表 '{table.name}' DDL生成失败，已跳过！"
                     f"\n>>>>>>>> 原因: {e}"
                     f"\n>>>>>>>> 列名列表: {col_names}"
-                    f"\n>>>>>>>> 提示: 若该表含 'vector' 列，请安装 'pgvector' 包使 SQLAlchemy 识别该类型"
+                    "\n>>>>>>>> 提示: 若该表含 'vector' 列，请安装 'pgvector' "
+                    "包使 SQLAlchemy 识别该类型"
                     f"\n>>>>>>>> 影响: 该表将以列名注释方式传给 LLM，无完整 DDL\n"
                 )
                 logger.warning(
@@ -406,6 +408,8 @@ class RDBMSConnector(BaseConnector):
                 eg:[{'name': 'id', 'type': 'int', 'default_expression': '',
                 'is_in_primary_key': True, 'comment': 'id'}, ...]
         """
+        if self._schema:
+            return self._inspector.get_columns(table_name, schema=self._schema)
         return self._inspector.get_columns(table_name)
 
     def _get_sample_rows(self, table: Table) -> str:
@@ -808,6 +812,8 @@ class RDBMSConnector(BaseConnector):
         Returns:
             List[Dict]:eg:[{'name': 'idx_key', 'column_names': ['id']}]
         """
+        if self._schema:
+            return self._inspector.get_indexes(table_name, schema=self._schema)
         return self._inspector.get_indexes(table_name)
 
     def get_show_create_table(self, table_name):
@@ -926,11 +932,11 @@ class RDBMSConnector(BaseConnector):
             ]
 
     def close(self):
-        if self._is_closed:
+        if getattr(self, "_is_closed", True):
             return
         logger.info("Closing RDBMS connector resources...")
         # Close all active sessions
-        for session in self._sessions:
+        for session in getattr(self, "_sessions", ()):
             try:
                 if session.is_active:
                     session.close()
@@ -938,7 +944,11 @@ class RDBMSConnector(BaseConnector):
                 logger.error(f"Error closing session: {e}")
 
         # Remove the scoped_session registry
-        self._db_sessions.remove()
+        db_sessions = getattr(self, "_db_sessions", None)
+        if db_sessions is not None:
+            db_sessions.remove()
         # Release connection pool resources
-        self._engine.dispose()
+        engine = getattr(self, "_engine", None)
+        if engine is not None:
+            engine.dispose()
         self._is_closed = True

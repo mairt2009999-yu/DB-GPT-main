@@ -7,6 +7,8 @@
 
 import { MessagePart, ToolPart } from '@/new-components/chat/content/OpenCodeSessionTurn';
 import { ChatHistoryResponse } from '@/types/chat';
+import { createGatewayFetchHeaders } from '@/utils/auth';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import { ReActSSEState, createReActSSEState, parseSSELine } from '@/utils/react-sse-parser';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -52,7 +54,12 @@ export interface UseReActAgentChatReturn {
 }
 
 export function useReActAgentChat(options: UseReActAgentChatOptions = {}): UseReActAgentChatReturn {
-  const { baseUrl = '/api/v1/chat/react-agent', onHistoryUpdate, onError, onComplete } = options;
+  const {
+    baseUrl = `${process.env.API_BASE_URL || GATEWAY_API_BASE}/api/v1/chat/react-agent`,
+    onHistoryUpdate,
+    onError,
+    onComplete,
+  } = options;
 
   const [streamingTurn, setStreamingTurn] = useState<StreamingTurn | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -173,10 +180,7 @@ export function useReActAgentChat(options: UseReActAgentChatOptions = {}): UseRe
       try {
         const response = await fetch(baseUrl, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'text/event-stream',
-          },
+          headers: createGatewayFetchHeaders(undefined, { json: true, eventStream: true }),
           body: JSON.stringify(request),
           signal: abortControllerRef.current.signal,
         });
@@ -194,6 +198,7 @@ export function useReActAgentChat(options: UseReActAgentChatOptions = {}): UseRe
         const decoder = new TextDecoder();
         let buffer = '';
 
+        // eslint-disable-next-line no-constant-condition
         while (true) {
           const { done, value } = await reader.read();
 
@@ -339,14 +344,11 @@ function formatReActResponse(parts: MessagePart[], finalContent: string): string
 
   // Format as ReAct-style text that can be parsed later
   let formatted = '';
-  let stepNum = 0;
-
   for (const part of parts) {
     if (part.type === 'reasoning') {
       formatted += `Thought: ${(part as any).text}\n`;
     } else if (part.type === 'tool') {
       const tool = part as ToolPart;
-      stepNum++;
       const action = tool.state.metadata?.action || tool.tool;
       formatted += `Action: ${action}\n`;
       if (tool.state.input) {

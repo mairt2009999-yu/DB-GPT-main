@@ -47,16 +47,27 @@ class ContextMiddleware(BaseHTTPMiddleware):
         user_info_header = request.headers.get("X-User-Info")
         if user_info_header:
             logger.info("X-User-Info: %s", user_info_header)
+        header_user_id = request.headers.get("X-User-Id")
+        user_info_user_id = _extract_user_id_from_user_info(user_info_header)
         request_context = RequestContext(
             authorization=request.headers.get("Authorization"),
-            user_id=(
-                request.headers.get("X-User-Id")
-                or _extract_user_id_from_user_info(user_info_header)
-            ),
+            user_id=header_user_id or user_info_user_id,
             tenant_id=request.headers.get("X-Tenant-Id"),
             request_id=request.headers.get("X-Request-Id"),
             roles=_split_roles(request.headers.get("X-Roles")),
             sys_code=request.headers.get("X-System-Code"),
+        )
+        logger.info(
+            "Request context inbound: path=%s headerUserId=%s "
+            "userInfoUserId=%s contextUserId=%s roles=%s sysCode=%s "
+            "requestId=%s",
+            request.url.path,
+            header_user_id,
+            user_info_user_id,
+            request_context.user_id,
+            request_context.roles,
+            request_context.sys_code,
+            request_context.request_id,
         )
         request.state.request_context = request_context
         token = set_current_request_context(request_context)
@@ -90,6 +101,16 @@ class ContextMiddleware(BaseHTTPMiddleware):
         )
 
         user_service_client = UserServiceClient.get_instance(system_app)
+        inbound_user_id = request_context.user_id
+        logger.info(
+            "Resolving principal via user-service: path=%s userId=%s "
+            "roles=%s sysCode=%s requestId=%s",
+            request.url.path,
+            inbound_user_id,
+            request_context.roles,
+            request_context.sys_code,
+            request_context.request_id,
+        )
         try:
             resolved_principal = await user_service_client.resolve_principal(
                 request_context
@@ -100,11 +121,39 @@ class ContextMiddleware(BaseHTTPMiddleware):
             return JSONResponse(status_code=403, content={"detail": str(exc)})
         except ServiceUnavailableError as exc:
             return JSONResponse(status_code=503, content={"detail": str(exc)})
+        resolved_user_id = resolved_principal.profile.user_id
+        logger.info(
+            "Resolved principal from user-service: inboundUserId=%s "
+            "resolvedUserId=%s roles=%s sysCode=%s requestId=%s",
+            inbound_user_id,
+            resolved_user_id,
+            resolved_principal.permissions.roles,
+            resolved_principal.sys_code,
+            resolved_principal.request_id,
+        )
+        if inbound_user_id and resolved_user_id != inbound_user_id:
+            logger.warning(
+                "User-service resolved principal user mismatch: "
+                "inboundUserId=%s resolvedUserId=%s path=%s",
+                inbound_user_id,
+                resolved_user_id,
+                request.url.path,
+            )
         request.state.resolved_principal = resolved_principal
-        request_context.user_id = resolved_principal.profile.user_id
+        request_context.user_id = resolved_user_id
         request_context.tenant_id = resolved_principal.profile.tenant_id
         request_context.roles = list(resolved_principal.permissions.roles)
         request_context.sys_code = resolved_principal.sys_code
+        logger.info(
+            "Request context resolved: path=%s userId=%s tenantId=%s "
+            "roles=%s sysCode=%s requestId=%s",
+            request.url.path,
+            request_context.user_id,
+            request_context.tenant_id,
+            request_context.roles,
+            request_context.sys_code,
+            request_context.request_id,
+        )
         token = set_current_resolved_principal(resolved_principal)
         request.state._resolved_principal_token = token
         return None

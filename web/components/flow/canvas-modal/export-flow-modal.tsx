@@ -1,4 +1,5 @@
 import { IFlowData, IFlowUpdateParam } from '@/types/flow';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import { Button, Form, Input, Modal, Radio, message } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { ReactFlowInstance } from 'reactflow';
@@ -32,7 +33,7 @@ export const ExportFlowModal: React.FC<Props> = ({
       a.download = values.file_name || 'flow.json';
       a.click();
     } else {
-      const linkUrl = `${process.env.API_BASE_URL ?? ''}/api/v2/serve/awel/flow/export/${values.uid}?export_type=${values.export_type}&format=${values.format}`;
+      const linkUrl = `${process.env.API_BASE_URL || GATEWAY_API_BASE}/api/v2/serve/awel/flow/export/${values.uid}?export_type=${values.export_type}&format=${values.format}`;
       window.open(linkUrl);
     }
     messageApi.success(t('Export_Flow_Success'));

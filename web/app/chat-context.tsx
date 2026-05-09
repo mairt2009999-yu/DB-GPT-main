@@ -2,6 +2,7 @@ import { apiInterceptors, getUsableModels, queryAdminList } from '@/client/api';
 import { ChatHistoryResponse, DialogueListResponse, IChatDialogueSchema } from '@/types/chat';
 import { UserInfoResponse } from '@/types/userinfo';
 import { getUserId } from '@/utils';
+import { GATEWAY_AUTH_CHANGE_EVENT, isGatewayAuthenticated } from '@/utils/auth';
 import { STORAGE_THEME_KEY } from '@/utils/constants/index';
 import { useRequest } from 'ahooks';
 import { useSearchParams } from 'next/navigation';
@@ -90,6 +91,7 @@ const ChatContextProvider = ({ children }: { children: React.ReactElement }) => 
   const [mode, setMode] = useState<ThemeMode>('light');
   // 管理员列表
   const [adminList, setAdminList] = useState<UserInfoResponse[]>([]);
+  const [gatewayAuthenticated, setGatewayAuthenticated] = useState(false);
 
   const [currentDialogInfo, setCurrentDialogInfo] = useState({
     chat_scene: '',
@@ -97,15 +99,25 @@ const ChatContextProvider = ({ children }: { children: React.ReactElement }) => 
   });
 
   // 获取model
-  const { data: modelList = [] } = useRequest(async () => {
-    const [, res] = await apiInterceptors(getUsableModels());
-    return res ?? [];
-  });
+  const { data: modelList = [], run: queryModelListRun } = useRequest(
+    async () => {
+      const [, res] = await apiInterceptors(getUsableModels());
+      return res ?? [];
+    },
+    {
+      manual: true,
+    },
+  );
 
   // 获取管理员列表
   const { run: queryAdminListRun } = useRequest(
     async () => {
-      const [, res] = await apiInterceptors(queryAdminList({ role: 'admin' }));
+      const request = queryAdminList({ role: 'admin' });
+      if (!('then' in request)) {
+        return request ?? [];
+      }
+
+      const [, res] = await apiInterceptors(request);
       return res ?? [];
     },
     {
@@ -117,11 +129,25 @@ const ChatContextProvider = ({ children }: { children: React.ReactElement }) => 
   );
 
   useEffect(() => {
+    const syncGatewayAuthenticated = () => {
+      setGatewayAuthenticated(isGatewayAuthenticated());
+    };
+
+    syncGatewayAuthenticated();
+    window.addEventListener(GATEWAY_AUTH_CHANGE_EVENT, syncGatewayAuthenticated);
+    return () => window.removeEventListener(GATEWAY_AUTH_CHANGE_EVENT, syncGatewayAuthenticated);
+  }, []);
+
+  useEffect(() => {
+    if (!gatewayAuthenticated) {
+      return;
+    }
+
+    queryModelListRun();
     if (getUserId()) {
       queryAdminListRun();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryAdminListRun, getUserId()]);
+  }, [gatewayAuthenticated, queryAdminListRun, queryModelListRun]);
 
   useEffect(() => {
     setMode(getDefaultTheme());

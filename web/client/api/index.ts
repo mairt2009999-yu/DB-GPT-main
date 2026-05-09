@@ -1,4 +1,6 @@
 import { getUserId } from '@/utils';
+import { getGatewayAuthHeaders } from '@/utils/auth';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import { HEADER_USER_ID_KEY } from '@/utils/constants/index';
 import axios, { AxiosError, AxiosRequestConfig, AxiosResponse } from 'axios';
 
@@ -16,7 +18,7 @@ export type SuccessTuple<T = any, D = any> = [null, T, ResponseType<T>, ApiRespo
 export type FailedTuple<T = any, D = any> = [Error | AxiosError<T, D>, null, null, null];
 
 const ins = axios.create({
-  baseURL: process.env.API_BASE_URL ?? '',
+  baseURL: process.env.API_BASE_URL || GATEWAY_API_BASE,
 });
 
 const LONG_TIME_API: string[] = [
@@ -43,7 +45,13 @@ ins.interceptors.request.use(request => {
   if (!request.timeout) {
     request.timeout = isLongTimeApi ? 60000 : 100000;
   }
-  request.headers.set(HEADER_USER_ID_KEY, getUserId());
+  Object.entries(getGatewayAuthHeaders()).forEach(([key, value]) => {
+    request.headers.set(key, value);
+  });
+  const legacyUserId = getUserId();
+  if (legacyUserId) {
+    request.headers.set(HEADER_USER_ID_KEY, legacyUserId);
+  }
   return request;
 });
 

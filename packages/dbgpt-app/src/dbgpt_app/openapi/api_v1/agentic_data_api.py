@@ -44,12 +44,146 @@ REACT_KNOWLEDGE_CONTENT_PREVIEW_LIMIT = 500
 AUTO_DATA_MARKER_PATTERN = re.compile(
     r"###([A-Z0-9_]+)_START###\s*(.*?)\s*###\1_END###", re.DOTALL
 )
+RLS_LOG_PREFIX = ">>>>>>>>>>> [SQL拦截/RLS]"
 
 
 def _emit_react_knowledge_log(message: str, level: int = logging.INFO) -> None:
     log_line = f"{REACT_KNOWLEDGE_LOG_PREFIX} {message}"
     print(log_line)
     logger.log(level, log_line)
+
+
+def _format_react_sql_dataframe(
+    df: Any, sql_metadata: Optional[Dict[str, Any]] = None
+) -> str:
+    chunks: List[Dict[str, Any]] = []
+    if sql_metadata:
+        chunks.append({"output_type": "json", "content": sql_metadata})
+
+    if df is None or getattr(df, "empty", False):
+        return json.dumps(
+            {
+                "chunks": [
+                    *chunks,
+                    {"output_type": "text", "content": "查询返回空结果。"},
+                ]
+            },
+            ensure_ascii=False,
+        )
+    col_names = [str(col) for col in df.columns]
+    header = "| " + " | ".join(col_names) + " |"
+    separator = "| " + " | ".join(["---"] * len(col_names)) + " |"
+    md_rows = []
+    for _, row in df.head(50).iterrows():
+        md_rows.append("| " + " | ".join(str(v) for v in row.tolist()) + " |")
+    table = "\n".join([header, separator] + md_rows)
+    if len(df.index) > 50:
+        table += f"\n\n（仅显示前 50 行，共 {len(df.index)} 行）"
+    chunks.append({"output_type": "markdown", "content": table})
+    return json.dumps(
+        {"chunks": chunks},
+        ensure_ascii=False,
+    )
+
+
+def _run_connector_to_dataframe(datasource: Any, sql: str) -> Any:
+    import pandas as pd
+
+    if hasattr(datasource, "run_to_df"):
+        return datasource.run_to_df(sql)
+    result = datasource.run(sql)
+    if not result:
+        return pd.DataFrame()
+    columns = [str(c[0]) if isinstance(c, tuple) else str(c) for c in result[0]]
+    return pd.DataFrame(result[1:], columns=columns)
+
+
+async def _execute_react_sql_query_with_rls(
+    sql: str,
+    datasource: Any,
+    system_app: Any,
+    principal: Any,
+    conversation_id: str,
+) -> str:
+    """Execute ReAct sql_query through RLSAwareSQLExecutor and format markdown."""
+    import pandas as pd
+
+    from dbgpt_app.security.config import RLSConfig
+    from dbgpt_app.security.rls_client import RLSClient
+    from dbgpt_app.security.rls_executor import RLSAwareSQLExecutor
+    from dbgpt_app.security.stub_rls_client import StubRLSClient
+
+    try:
+        rls_config = system_app.get_component(RLSConfig.name, RLSConfig)
+    except Exception:
+        rls_config = RLSConfig()
+        logger.warning(
+            "%s RLS config component missing, fallback mode=%s",
+            RLS_LOG_PREFIX,
+            rls_config.mode,
+        )
+
+    if rls_config.mode == "off":
+        try:
+            rls_client = system_app.get_component(StubRLSClient.name, StubRLSClient)
+        except Exception:
+            rls_client = StubRLSClient()
+    else:
+        rls_client = system_app.get_component(RLSClient.name, RLSClient)
+
+    logger.info(
+        "%s 进入 SQL 拦截器 | source=ReAct.sql_query mode=%s failStrategy=%s userId=%s "
+        "roles=%s sysCode=%s conv=%s datasource=%s sql=%s",
+        RLS_LOG_PREFIX,
+        rls_config.mode,
+        rls_config.fail_strategy,
+        getattr(principal, "user_id", None),
+        getattr(principal, "roles", None),
+        getattr(principal, "sys_code", None),
+        conversation_id,
+        getattr(datasource, "db_name", None),
+        sql,
+    )
+    executor = RLSAwareSQLExecutor(
+        datasource=datasource,
+        rls_client=rls_client,
+        principal=principal,
+        conversation_id=conversation_id,
+        rls_mode=rls_config.mode,
+        fail_strategy=rls_config.fail_strategy,
+    )
+    result = await executor.execute(sql)
+    if isinstance(result.data, pd.DataFrame):
+        df = result.data
+    else:
+        df = _run_connector_to_dataframe(
+            type(
+                "_RLSResultDataSource",
+                (),
+                {"run": lambda self, command: result.data},
+            )(),
+            sql,
+        )
+    logger.info(
+        "%s ReAct sql_query result | mode=%s conv=%s rewrittenSql=%s "
+        "snapshot=%s rowCount=%s",
+        RLS_LOG_PREFIX,
+        result.rls_mode,
+        conversation_id,
+        result.rewritten_sql,
+        result.rls_snapshot,
+        len(df.index) if hasattr(df, "index") else None,
+    )
+    return _format_react_sql_dataframe(
+        df,
+        sql_metadata={
+            "kind": "sql_execution",
+            "original_sql": sql,
+            "rewritten_sql": result.rewritten_sql,
+            "rls_mode": result.rls_mode,
+            "rls_snapshot": result.rls_snapshot,
+        },
+    )
 
 
 def _normalize_react_knowledge_preview(
@@ -1609,8 +1743,7 @@ print(json.dumps(summary, ensure_ascii=False))
     async def knowledge_retrieve(query: str) -> str:
         if not knowledge_resources:
             _emit_react_knowledge_log(
-                "knowledge_retrieve被调用但无可用知识库资源"
-                f" | query={query}",
+                f"knowledge_retrieve被调用但无可用知识库资源 | query={query}",
                 logging.WARNING,
             )
             return json.dumps(
@@ -1703,7 +1836,7 @@ print(json.dumps(summary, ensure_ascii=False))
             '参数: {"sql": "SELECT 语句"}'
         )
     )
-    def sql_query(sql: str) -> str:
+    async def sql_query(sql: str) -> str:
         """Execute a read-only SQL query against the selected database."""
         if database_connector is None:
             return json.dumps(
@@ -1749,37 +1882,24 @@ print(json.dumps(summary, ensure_ascii=False))
                 )
 
         try:
-            result = database_connector.run(sql_stripped)
-            if not result:
-                return json.dumps(
-                    {
-                        "chunks": [
-                            {"output_type": "text", "content": "查询返回空结果。"}
-                        ]
-                    },
-                    ensure_ascii=False,
-                )
+            from dbgpt_app.security.principal import current_principal
 
-            # result[0] = column names, result[1:] = data rows
-            columns = result[0]
-            col_names = [str(c[0]) if isinstance(c, tuple) else str(c) for c in columns]
-            rows = result[1:]
-
-            # Build markdown table
-            header = "| " + " | ".join(col_names) + " |"
-            separator = "| " + " | ".join(["---"] * len(col_names)) + " |"
-            md_rows = []
-            for row in rows[:50]:
-                md_rows.append("| " + " | ".join(str(v) for v in row) + " |")
-            table = "\n".join([header, separator] + md_rows)
-            if len(rows) > 50:
-                table += f"\n\n（仅显示前 50 行，共 {len(rows)} 行）"
-
-            return json.dumps(
-                {"chunks": [{"output_type": "markdown", "content": table}]},
-                ensure_ascii=False,
+            return await _execute_react_sql_query_with_rls(
+                sql=sql_stripped,
+                datasource=database_connector,
+                system_app=CFG.SYSTEM_APP,
+                principal=current_principal(),
+                conversation_id=react_state.get("conv_id") or dialogue.conv_uid or "",
             )
         except Exception as e:
+            logger.warning(
+                "%s ReAct sql_query failed | sql=%s errType=%s err=%s",
+                RLS_LOG_PREFIX,
+                sql_stripped,
+                type(e).__name__,
+                e,
+                exc_info=e,
+            )
             return json.dumps(
                 {
                     "chunks": [

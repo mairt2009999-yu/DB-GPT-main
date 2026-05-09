@@ -30,11 +30,13 @@ rls_client.py  ——  行级数据权限（Row-Level Security）谓词客户端
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from cachetools import TTLCache
 
+from dbgpt.component import LifeCycle
 from dbgpt_app.security.exceptions import RLSUpstreamUnavailableError  # re-export
 
 if TYPE_CHECKING:
@@ -42,6 +44,7 @@ if TYPE_CHECKING:
     from dbgpt_app.microservice.user_service import UserServiceClient
 
 logger = logging.getLogger(__name__)
+RLS_LOG_PREFIX = ">>>>>>>>>>> [SQL拦截/RLS]"
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +60,7 @@ class RLSTableRef:
     schema: str  # 数据库 schema 名
     table: str  # 表名（不含 schema 前缀）
     alias: str = ""  # SQL 里该表的别名，仅在注入谓词时使用，不参与缓存键
+    columns: Tuple[str, ...] = field(default_factory=tuple)  # 表列名，用于谓词适配
 
 
 @dataclass
@@ -90,13 +94,15 @@ class RLSRule:
 # ---------------------------------------------------------------------------
 
 
-class RLSClient:
+class RLSClient(LifeCycle):
     """行级权限谓词客户端（user-service 适配器版）。
 
     提供 batch_fetch 接口，供 RLSAwareSQLExecutor 使用。
     内部逐表调用 UserServiceClient.get_sql_fragment_by_user_id，
     维护 L1 TTLCache + stale 缓存兜底。
     """
+
+    name = "dbgpt_rls_client"
 
     def __init__(
         self,
@@ -116,7 +122,10 @@ class RLSClient:
         # L1: TTL 缓存，key -> RLSRule
         self._l1_cache: TTLCache = TTLCache(maxsize=1024, ttl=local_ttl_seconds)
         # stale: 无 TTL，存最近一次成功的 RLSRule
-        self._stale_cache: dict[str, RLSRule] = {}
+        self._stale_cache: dict[str, Tuple[RLSRule, float]] = {}
+
+    def init_app(self, system_app) -> None:
+        self.system_app = system_app
 
     @classmethod
     def from_user_service(cls, system_app) -> "RLSClient":
@@ -155,37 +164,72 @@ class RLSClient:
             RLSUpstreamUnavailableError: 上游不可用且无 stale 缓存。
         """
         from dbgpt_app.microservice.user_service import (
+            AuthenticationFailedError,
             AuthorizationFailedError,
             ServiceUnavailableError,
         )
 
+        logger.info(
+            "%s RLS客户端批量拉取权限片段 | userId=%s sysCode=%s tableCount=%s",
+            RLS_LOG_PREFIX,
+            getattr(principal, "user_id", None),
+            getattr(principal, "sys_code", None),
+            len(tables),
+        )
         results: List[RLSRule] = []
         for ref in tables:
             cache_key = self._make_cache_key(principal, ref)
             # L1 命中
             if cache_key in self._l1_cache:
+                logger.info(
+                    "%s RLS客户端L1缓存命中 | key=%s table=%s",
+                    RLS_LOG_PREFIX,
+                    cache_key,
+                    ref.table,
+                )
                 results.append(self._l1_cache[cache_key])
                 continue
             # L1 miss → 调上游
             try:
+                logger.info(
+                    "%s RLS客户端L1缓存未命中 | key=%s table=%s",
+                    RLS_LOG_PREFIX,
+                    cache_key,
+                    ref.table,
+                )
                 rule = await self._fetch_one(principal, ref)
                 self._l1_cache[cache_key] = rule
-                self._stale_cache[cache_key] = rule
+                self._stale_cache[cache_key] = (rule, time.time())
                 results.append(rule)
-            except (ServiceUnavailableError, OSError, Exception) as exc:
-                # 只有非 AuthorizationFailedError / AuthenticationFailedError 走 stale
-                if isinstance(exc, AuthorizationFailedError):
-                    # 已在 _fetch_one 里处理，不应到这里
-                    raise
-                # 查 stale
-                if cache_key in self._stale_cache:
+            except (AuthenticationFailedError, AuthorizationFailedError):
+                logger.warning(
+                    "%s client auth failure | table=%s userId=%s",
+                    RLS_LOG_PREFIX,
+                    ref.table,
+                    getattr(principal, "user_id", None),
+                )
+                raise
+            except (ServiceUnavailableError, OSError) as exc:
+                stale_rule = self._get_stale_rule(cache_key)
+                if stale_rule is not None:
                     logger.warning(
-                        "RLS upstream unavailable, using stale cache for table=%s err=%s",
+                        "%s upstream unavailable, using stale cache | "
+                        "table=%s errType=%s err=%s",
+                        RLS_LOG_PREFIX,
                         ref.table,
+                        type(exc).__name__,
                         exc,
                     )
-                    results.append(self._stale_cache[cache_key])
+                    results.append(stale_rule)
                 else:
+                    logger.warning(
+                        "%s upstream unavailable, no stale cache | table=%s "
+                        "errType=%s err=%s",
+                        RLS_LOG_PREFIX,
+                        ref.table,
+                        type(exc).__name__,
+                        exc,
+                    )
                     raise RLSUpstreamUnavailableError(
                         f"Upstream unavailable and no stale cache for table={ref.table}"
                     ) from exc
@@ -200,6 +244,16 @@ class RLSClient:
         user_id = getattr(principal, "user_id", "") or ""
         sys_code = getattr(principal, "sys_code", "") or ""
         return f"{user_id}:{sys_code}:{table.table}"
+
+    def _get_stale_rule(self, cache_key: str) -> Optional[RLSRule]:
+        cached = self._stale_cache.get(cache_key)
+        if not cached:
+            return None
+        rule, cached_at = cached
+        if time.time() - cached_at > self._stale_ttl:
+            self._stale_cache.pop(cache_key, None)
+            return None
+        return rule
 
     async def _fetch_one(
         self,
@@ -216,8 +270,25 @@ class RLSClient:
         from dbgpt_app.microservice.user_service import AuthorizationFailedError
 
         try:
+            logger.info(
+                "%s 调用User服务获取SQL片段 | userId=%s tableCode=%s datasource=%s "
+                "schema=%s alias=%s",
+                RLS_LOG_PREFIX,
+                getattr(principal, "user_id", None),
+                ref.table,
+                ref.datasource,
+                ref.schema,
+                ref.alias,
+            )
             fragment = await self._user_service.get_sql_fragment_by_user_id(
                 principal, ref.table
+            )
+            logger.info(
+                "%s User服务返回SQL片段 | userId=%s tableCode=%s sqlFragment=%s",
+                RLS_LOG_PREFIX,
+                fragment.user_id,
+                fragment.table_code,
+                fragment.sql_fragment,
             )
             return RLSRule(
                 table=ref.table,
@@ -225,6 +296,12 @@ class RLSClient:
                 predicate=fragment.sql_fragment or "",
             )
         except AuthorizationFailedError:
+            logger.warning(
+                "%s sql fragment authorization denied | userId=%s tableCode=%s",
+                RLS_LOG_PREFIX,
+                getattr(principal, "user_id", None),
+                ref.table,
+            )
             return RLSRule(table=ref.table, allowed=False, predicate="")
 
     def invalidate(

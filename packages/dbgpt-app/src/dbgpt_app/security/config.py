@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import List, Literal
 
-from dbgpt._private.pydantic import BaseModel
+from dbgpt.component import LifeCycle
+from dbgpt.util.parameter_utils import BaseParameters
 
 
-class RLSConfig(BaseModel):
+@dataclass
+class RLSConfig(BaseParameters, LifeCycle):
     """L3 行级权限配置。
 
     - mode：``off`` 直通 / ``shadow`` 仅记录改写差异 / ``enforce`` 强制拦截
@@ -20,10 +23,15 @@ class RLSConfig(BaseModel):
     - admin_role_codes：管理员角色编码列表（与 principal.is_admin 对齐）
     """
 
-    mode: Literal["off", "shadow", "enforce"] = "off"
-    fail_strategy: Literal["close", "open"] = "close"
-    upstream_url: str = ""  # v1 不再使用，保留字段供后续接入
-    upstream_timeout_ms: int = 800
-    local_ttl_seconds: int = 60
-    stale_fallback_seconds: int = 1800
-    admin_role_codes: List[str] = []
+    name: str = field(default="dbgpt_rls_config")
+    mode: Literal["off", "shadow", "enforce"] = field(default="off")
+    fail_strategy: Literal["close", "open"] = field(default="close")
+    upstream_url: str = field(default="")  # v1 不再使用，保留字段供后续接入
+    upstream_timeout_ms: int = field(default=800)
+    local_ttl_seconds: int = field(default=60)
+    stale_fallback_seconds: int = field(default=1800)
+    admin_role_codes: List[str] = field(default_factory=list)
+
+    def init_app(self, system_app) -> None:
+        """SystemApp component compatibility hook."""
+        self.system_app = system_app

@@ -96,7 +96,8 @@ class ChatWithDbAutoExecute(BaseChat):
                 if len(table_infos) > self.curr_config.schema_max_tokens:
                     table_infos = table_infos[: self.curr_config.schema_max_tokens]
                 print(
-                    f">>>>>>>> [DB对话任务] 零命中降级完成 | 获取 {len(table_infos)} 条表结构"
+                    ">>>>>>>> [DB对话任务] 零命中降级完成 | "
+                    f"获取 {len(table_infos)} 条表结构"
                     f"\n{'>' * 60}\n"
                 )
             # ─────────────────────────────────────────────────────────────────
@@ -145,14 +146,14 @@ class ChatWithDbAutoExecute(BaseChat):
         # 1. 取 RLSClient（已注册到 SystemApp；mode=off 时是 StubRLSClient）
         try:
             rls_client = self.system_app.get_component(
-                RLSClient.__name__, RLSClient, default_component=None
+                RLSClient.name, RLSClient, default_component=None
             )
         except Exception:
             rls_client = None
         if rls_client is None:
             try:
                 rls_client = self.system_app.get_component(
-                    StubRLSClient.__name__, StubRLSClient, default_component=None
+                    StubRLSClient.name, StubRLSClient, default_component=None
                 )
             except Exception:
                 rls_client = None
@@ -162,7 +163,7 @@ class ChatWithDbAutoExecute(BaseChat):
         # 2. 取 RLSConfig
         try:
             cfg = self.system_app.get_component(
-                RLSConfig.__name__, RLSConfig, default_component=None
+                RLSConfig.name, RLSConfig, default_component=None
             )
         except Exception:
             cfg = None

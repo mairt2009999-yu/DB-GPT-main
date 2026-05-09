@@ -115,6 +115,16 @@ async def _log_resource_sql_fragment() -> None:
         return
     try:
         logger.info(
+            "Request context before SQL fragment lookup: userId=%s tenantId=%s "
+            "roles=%s sysCode=%s requestId=%s tableCode=%s",
+            request_context.user_id,
+            request_context.tenant_id,
+            request_context.roles,
+            request_context.sys_code,
+            request_context.request_id,
+            "resource",
+        )
+        logger.info(
             "Calling user-service SQL fragment: userId=%s tableCode=%s",
             request_context.user_id,
             "resource",
@@ -129,6 +139,14 @@ async def _log_resource_sql_fragment() -> None:
             sql_fragment.table_code,
             sql_fragment.sql_fragment,
         )
+        if request_context.user_id and sql_fragment.user_id != request_context.user_id:
+            logger.warning(
+                "User-service SQL fragment user mismatch: requestUserId=%s "
+                "fragmentUserId=%s tableCode=%s",
+                request_context.user_id,
+                sql_fragment.user_id,
+                sql_fragment.table_code,
+            )
     except Exception as exc:
         logger.warning(
             "Failed to fetch user-service SQL fragment: %s: %s",

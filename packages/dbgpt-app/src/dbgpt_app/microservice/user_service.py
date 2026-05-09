@@ -92,7 +92,7 @@ class UserServiceClient(BaseComponent):
         return self.system_app.config.configs["app_config"]
 
     def _default_client_factory(self, timeout: httpx.Timeout) -> httpx.AsyncClient:
-        return httpx.AsyncClient(timeout=timeout)
+        return httpx.AsyncClient(timeout=timeout, trust_env=False)
 
     async def resolve_principal(
         self, request_context: RequestContext
@@ -103,7 +103,7 @@ class UserServiceClient(BaseComponent):
             raise AuthenticationFailedError("Missing X-User-Id header")
         last_error = None
         last_endpoint = None
-        attempts = max(1, self.remote_config.retries)
+        attempts = self._max_attempts()
         for _ in range(attempts):
             instance = await self.discovery.get_service_instance(self.remote_config)
             if not instance:
@@ -157,7 +157,7 @@ class UserServiceClient(BaseComponent):
             raise AuthenticationFailedError("Missing X-User-Id header")
         last_error = None
         last_endpoint = None
-        attempts = max(1, self.remote_config.retries)
+        attempts = self._max_attempts()
         for _ in range(attempts):
             instance = await self.discovery.get_service_instance(self.remote_config)
             if not instance:
@@ -214,6 +214,9 @@ class UserServiceClient(BaseComponent):
         return self.remote_config.sql_fragment_path.format(
             user_id=quote(str(request_context.user_id), safe="")
         )
+
+    def _max_attempts(self) -> int:
+        return max(1, self.remote_config.retries + 1)
 
     def _format_remote_error(
         self, exc: Optional[BaseException], endpoint: Optional[str]

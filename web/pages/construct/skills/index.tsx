@@ -1,5 +1,7 @@
 import MarkDownContext from '@/new-components/common/MarkdownContext';
 import ConstructLayout from '@/new-components/layout/Construct';
+import { createGatewayFetchHeaders } from '@/utils/auth';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import axios from '@/utils/ctx-axios';
 import {
   CloseOutlined,
@@ -117,7 +119,7 @@ function Skills() {
     setListLoading(true);
     const currentFetch = ++listFetchCountRef.current;
     try {
-      const response = (await axios.get(`${process.env.API_BASE_URL ?? ''}/api/v1/skills/list`)) as any;
+      const response = (await axios.get('/api/v1/skills/list')) as any;
       if (currentFetch !== listFetchCountRef.current) return;
       if (response?.success && Array.isArray(response.data)) {
         setSkillsList(response.data as SkillItem[]);
@@ -142,7 +144,7 @@ function Skills() {
   const fetchDetail = useCallback(async (skillName: string, filePath: string) => {
     setDetailLoading(true);
     try {
-      const response = await (axios.get(`${process.env.API_BASE_URL ?? ''}/api/v1/skills/detail`, {
+      const response = await (axios.get('/api/v1/skills/detail', {
         params: { skill_name: skillName, file_path: filePath },
       }) as Promise<any>);
       if (response?.success && response.data) {
@@ -234,8 +236,9 @@ function Skills() {
       const formData = new FormData();
       formData.append('file', rawFile, rawFile.name);
       try {
-        const res = await fetch(`${process.env.API_BASE_URL ?? ''}/api/v1/skills/upload`, {
+        const res = await fetch(`${process.env.API_BASE_URL || GATEWAY_API_BASE}/api/v1/skills/upload`, {
           method: 'POST',
+          headers: createGatewayFetchHeaders(),
           body: formData,
         });
         const json = await res.json();

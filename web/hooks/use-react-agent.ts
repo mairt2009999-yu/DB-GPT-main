@@ -6,6 +6,8 @@
  */
 
 import { MessagePart, ReasoningPart, ToolPart } from '@/new-components/chat/content/OpenCodeSessionTurn';
+import { createGatewayFetchHeaders } from '@/utils/auth';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import { ReActSSEState, createReActSSEState, parseSSELine } from '@/utils/react-sse-parser';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -55,7 +57,13 @@ const initialState: ReActAgentState = {
 };
 
 export function useReActAgent(options: UseReActAgentOptions = {}): UseReActAgentReturn {
-  const { baseUrl = '/api/v1/chat/react-agent', onPartUpdate, onFinalContent, onError, onComplete } = options;
+  const {
+    baseUrl = `${process.env.API_BASE_URL || GATEWAY_API_BASE}/api/v1/chat/react-agent`,
+    onPartUpdate,
+    onFinalContent,
+    onError,
+    onComplete,
+  } = options;
 
   const [state, setState] = useState<ReActAgentState>(initialState);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -153,10 +161,7 @@ export function useReActAgent(options: UseReActAgentOptions = {}): UseReActAgent
       try {
         const response = await fetch(baseUrl, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'text/event-stream',
-          },
+          headers: createGatewayFetchHeaders(undefined, { json: true, eventStream: true }),
           body: JSON.stringify(request),
           signal: abortControllerRef.current.signal,
         });
@@ -174,6 +179,7 @@ export function useReActAgent(options: UseReActAgentOptions = {}): UseReActAgent
         const decoder = new TextDecoder();
         let buffer = '';
 
+        // eslint-disable-next-line no-constant-condition
         while (true) {
           const { done, value } = await reader.read();
 
@@ -249,12 +255,6 @@ export function useReActAgent(options: UseReActAgentOptions = {}): UseReActAgent
 export function parseReActText(text: string): { parts: MessagePart[]; finalContent: string } {
   const parts: MessagePart[] = [];
   let finalContent = '';
-
-  // Pattern to match ReAct format
-  const thoughtPattern = /Thought:\s*(.*?)(?=Action:|Observation:|$)/gs;
-  const actionPattern = /Action:\s*(.*?)(?=Action Input:|Observation:|$)/gs;
-  const actionInputPattern = /Action Input:\s*(.*?)(?=Observation:|Thought:|$)/gs;
-  const observationPattern = /Observation:\s*(.*?)(?=Thought:|$)/gs;
 
   let stepNum = 0;
   let currentThought = '';

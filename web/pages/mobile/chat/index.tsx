@@ -3,8 +3,8 @@ import { apiInterceptors, getAppInfo, getChatHistory, getDialogueList, postChatM
 import useUser from '@/hooks/use-user';
 import { IApp } from '@/types/app';
 import { ChatHistoryResponse } from '@/types/chat';
-import { getUserId } from '@/utils';
-import { HEADER_USER_ID_KEY } from '@/utils/constants/index';
+import { getGatewayAuthHeaders } from '@/utils/auth';
+import { GATEWAY_API_BASE } from '@/utils/constants/gateway';
 import { EventStreamContentType, fetchEventSource } from '@microsoft/fetch-event-source';
 import { useRequest } from 'ahooks';
 import { Spin } from 'antd';
@@ -236,12 +236,9 @@ const MobileChat: React.FC = () => {
     setHistory([...history, ...tempHistory]);
     setCanNewChat(false);
     try {
-      await fetchEventSource(`${process.env.API_BASE_URL ?? ''}/api/v1/chat/completions`, {
+      await fetchEventSource(`${process.env.API_BASE_URL || GATEWAY_API_BASE}/api/v1/chat/completions`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          [HEADER_USER_ID_KEY]: getUserId() ?? '',
-        },
+        headers: getGatewayAuthHeaders({ json: true, eventStream: true }),
         signal: ctrl.current.signal,
         body: JSON.stringify(params),
         openWhenHidden: true,

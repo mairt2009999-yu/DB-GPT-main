@@ -8,6 +8,7 @@ from dbgpt_app.config import ApplicationConfig, ServiceWebParameters
 from dbgpt_serve.rag.storage_manager import StorageManager
 
 logger = logging.getLogger(__name__)
+RLS_LOG_PREFIX = ">>>>>>>>>>> [SQL拦截/RLS]"
 
 
 def initialize_components(
@@ -21,11 +22,11 @@ def initialize_components(
         _initialize_rerank_model,
     )
     from dbgpt_app.initialization.scheduler import DefaultScheduler
+    from dbgpt_app.initialization.serve_initialization import register_serve_apps
     from dbgpt_app.microservice.discovery import ServiceDiscovery
     from dbgpt_app.microservice.nacos import NacosNamingClient
     from dbgpt_app.microservice.registration import ServiceRegistration
     from dbgpt_app.microservice.user_service import UserServiceClient
-    from dbgpt_app.initialization.serve_initialization import register_serve_apps
     from dbgpt_serve.datasource.manages.connector_manager import ConnectorManager
 
     web_config = param.service.web
@@ -242,21 +243,23 @@ def _initialize_rls(system_app: SystemApp, param):
     from dbgpt_app.security.rls_client import RLSClient
     from dbgpt_app.security.stub_rls_client import StubRLSClient
 
-    # Read from serve.rls section; default to mode=off if missing
-    rls_cfg_dict = getattr(getattr(param, "serve", None), "rls", None)
-    if rls_cfg_dict:
-        cfg = (
-            RLSConfig(**rls_cfg_dict)
-            if isinstance(rls_cfg_dict, dict)
-            else rls_cfg_dict
-        )
-    else:
-        cfg = RLSConfig()
+    cfg = getattr(param.service.web, "rls", None) or RLSConfig()
 
     system_app.register_instance(cfg)
+    logger.info(
+        "%s 初始化RLS组件 | mode=%s failStrategy=%s localTtl=%s "
+        "staleFallback=%s adminRoles=%s",
+        RLS_LOG_PREFIX,
+        cfg.mode,
+        cfg.fail_strategy,
+        cfg.local_ttl_seconds,
+        cfg.stale_fallback_seconds,
+        cfg.admin_role_codes,
+    )
 
     if cfg.mode == "off":
         system_app.register_instance(StubRLSClient())
+        logger.info("%s mode=off 已注册StubRLSClient", RLS_LOG_PREFIX)
     else:
         # 使用已注册的 UserServiceClient（Nacos 服务发现 + getSqlFragmentByUserId）
         try:
@@ -271,10 +274,6 @@ def _initialize_rls(system_app: SystemApp, param):
                 stale_fallback_seconds=cfg.stale_fallback_seconds,
             )
             system_app.register_instance(rls_client)
+            logger.info("%s 已注册RLSClient user-service适配器", RLS_LOG_PREFIX)
         except Exception as e:
-            logger.warning(
-                "Failed to initialize RLSClient with UserServiceClient, "
-                "falling back to StubRLSClient: %s",
-                e,
-            )
-            system_app.register_instance(StubRLSClient())
+            raise RuntimeError("Failed to initialize RLSClient") from e
