@@ -17,6 +17,7 @@ from dbgpt_app.microservice.context import (
 )
 
 logger = logging.getLogger(__name__)
+_REQUEST_CONTEXT_LOG_EXCLUDED_PATHS = {"/api/health", "/api/controller/heartbeat"}
 
 
 def _split_roles(raw_roles: str | None) -> list[str]:
@@ -44,6 +45,9 @@ class ContextMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next):
+        should_log_request_context = (
+            request.url.path not in _REQUEST_CONTEXT_LOG_EXCLUDED_PATHS
+        )
         user_info_header = request.headers.get("X-User-Info")
         if user_info_header:
             logger.info("X-User-Info: %s", user_info_header)
@@ -57,18 +61,19 @@ class ContextMiddleware(BaseHTTPMiddleware):
             roles=_split_roles(request.headers.get("X-Roles")),
             sys_code=request.headers.get("X-System-Code"),
         )
-        logger.info(
-            "Request context inbound: path=%s headerUserId=%s "
-            "userInfoUserId=%s contextUserId=%s roles=%s sysCode=%s "
-            "requestId=%s",
-            request.url.path,
-            header_user_id,
-            user_info_user_id,
-            request_context.user_id,
-            request_context.roles,
-            request_context.sys_code,
-            request_context.request_id,
-        )
+        if should_log_request_context:
+            logger.info(
+                "Request context inbound: path=%s headerUserId=%s "
+                "userInfoUserId=%s contextUserId=%s roles=%s sysCode=%s "
+                "requestId=%s",
+                request.url.path,
+                header_user_id,
+                user_info_user_id,
+                request_context.user_id,
+                request_context.roles,
+                request_context.sys_code,
+                request_context.request_id,
+            )
         request.state.request_context = request_context
         token = set_current_request_context(request_context)
         try:
@@ -144,16 +149,17 @@ class ContextMiddleware(BaseHTTPMiddleware):
         request_context.tenant_id = resolved_principal.profile.tenant_id
         request_context.roles = list(resolved_principal.permissions.roles)
         request_context.sys_code = resolved_principal.sys_code
-        logger.info(
-            "Request context resolved: path=%s userId=%s tenantId=%s "
-            "roles=%s sysCode=%s requestId=%s",
-            request.url.path,
-            request_context.user_id,
-            request_context.tenant_id,
-            request_context.roles,
-            request_context.sys_code,
-            request_context.request_id,
-        )
+        if request.url.path not in _REQUEST_CONTEXT_LOG_EXCLUDED_PATHS:
+            logger.info(
+                "Request context resolved: path=%s userId=%s tenantId=%s "
+                "roles=%s sysCode=%s requestId=%s",
+                request.url.path,
+                request_context.user_id,
+                request_context.tenant_id,
+                request_context.roles,
+                request_context.sys_code,
+                request_context.request_id,
+            )
         token = set_current_resolved_principal(resolved_principal)
         request.state._resolved_principal_token = token
         return None

@@ -496,7 +496,6 @@ class DefaultModelWorker(ModelWorker):
         if model_output.has_text:
             current_output += model_output.text
         incremental_output = current_output[len(previous_response) :]
-        print(incremental_output, end="", flush=True)
 
         metrics = _new_metrics_from_model_output(last_metrics, is_first_generate, usage)
         model_output.metrics = metrics

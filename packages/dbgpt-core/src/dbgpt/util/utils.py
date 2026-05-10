@@ -23,10 +23,97 @@ server_error_msg = (
 )
 
 handler = None
+_DBGPT_CONSOLE_HANDLER_ATTR = "_dbgpt_console_handler"
 
 
 def _get_logging_level() -> str:
     return os.getenv("DBGPT_LOG_LEVEL", "INFO")
+
+
+class _BelowLevelFilter(logging.Filter):
+    def __init__(self, max_level: int) -> None:
+        super().__init__()
+        self._max_level = max_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < self._max_level
+
+
+class _AtLeastLevelFilter(logging.Filter):
+    def __init__(self, min_level: int) -> None:
+        super().__init__()
+        self._min_level = min_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= self._min_level
+
+
+def _coerce_logging_level(logging_level: Optional[str] = None) -> int:
+    if not logging_level:
+        logging_level = _get_logging_level()
+    if isinstance(logging_level, str):
+        return logging.getLevelName(logging_level.upper())
+    return logging_level
+
+
+def _default_formatter() -> logging.Formatter:
+    return logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def _is_root_console_handler(handler: logging.Handler) -> bool:
+    if getattr(handler, _DBGPT_CONSOLE_HANDLER_ATTR, False):
+        return True
+    if isinstance(handler, logging.FileHandler):
+        return False
+    return (
+        isinstance(handler, logging.StreamHandler)
+        and getattr(handler, "stream", None) in (sys.stdout, sys.stderr)
+    )
+
+
+def _new_console_handler(
+    stream,
+    logging_level: int,
+    formatter: logging.Formatter,
+    level_filter: logging.Filter,
+) -> logging.StreamHandler:
+    console_handler = logging.StreamHandler(stream)
+    console_handler.setLevel(logging_level)
+    console_handler.setFormatter(formatter)
+    console_handler.addFilter(level_filter)
+    setattr(console_handler, _DBGPT_CONSOLE_HANDLER_ATTR, True)
+    return console_handler
+
+
+def _configure_root_console_handlers(
+    logging_level: int, formatter: logging.Formatter
+) -> None:
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging_level)
+    for existing_handler in list(root_logger.handlers):
+        if _is_root_console_handler(existing_handler):
+            root_logger.removeHandler(existing_handler)
+            existing_handler.close()
+
+    root_logger.addHandler(
+        _new_console_handler(
+            sys.stdout,
+            logging_level,
+            formatter,
+            _BelowLevelFilter(logging.ERROR),
+        )
+    )
+    root_logger.addHandler(
+        _new_console_handler(
+            sys.stderr,
+            logging.ERROR,
+            formatter,
+            _AtLeastLevelFilter(logging.ERROR),
+        )
+    )
 
 
 @dataclass
@@ -72,15 +159,12 @@ class LoggingParameters(BaseParameters):
 def setup_logging_level(
     logging_level: Optional[str] = None, logger_name: Optional[str] = None
 ):
-    if not logging_level:
-        logging_level = _get_logging_level()
-    if type(logging_level) is str:
-        logging_level = logging.getLevelName(logging_level.upper())
+    logging_level = _coerce_logging_level(logging_level)
     if logger_name:
         logger = logging.getLogger(logger_name)
-        logger.setLevel(cast(str, logging_level))
+        logger.setLevel(cast(int, logging_level))
     else:
-        logging.basicConfig(level=logging_level, encoding="utf-8")
+        _configure_root_console_handlers(logging_level, _default_formatter())
 
 
 def setup_logging(
@@ -99,14 +183,7 @@ def setup_logging(
     if not logging_level:
         logging_level = _get_logging_level()
     logger_filename = resolve_root_path(logger_filename)
-    logger = _build_logger(logger_name, logging_level, logger_filename, redirect_stdio)
-    try:
-        import coloredlogs
-
-        color_level = logging_level if logging_level else "INFO"
-        coloredlogs.install(level=color_level, logger=logger)
-    except ImportError:
-        pass
+    _build_logger(logger_name, logging_level, logger_filename, redirect_stdio)
 
 
 def get_gpu_memory(max_gpus=None):
@@ -137,15 +214,10 @@ def _build_logger(
 ):
     global handler
 
-    formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    logging_level = _coerce_logging_level(logging_level)
+    formatter = _default_formatter()
 
-    # Set the format of root handlers
-    if not logging.getLogger().handlers:
-        setup_logging_level(logging_level=logging_level)
-    logging.getLogger().handlers[0].setFormatter(formatter)
+    _configure_root_console_handlers(logging_level, formatter)
 
     # Add a file handler for all loggers
     if handler is None and logger_filename:
@@ -169,14 +241,7 @@ def _build_logger(
                 logging.getLogger(name).debug(f"Skipping non-logger: {name}")
 
         if redirect_stdio:
-            stdout_handler = logging.StreamHandler(sys.stdout, encoding="utf-8")
-            stdout_handler.setFormatter(formatter)
-            stderr_handler = logging.StreamHandler(sys.stderr, encoding="utf-8")
-            stderr_handler.setFormatter(formatter)
-
-            root_logger = logging.getLogger()
-            root_logger.addHandler(stdout_handler)
-            root_logger.addHandler(stderr_handler)
+            _configure_root_console_handlers(logging_level, formatter)
             logging.getLogger().debug("Added stdout and stderr handlers to root logger")
     logger = logging.getLogger(logger_name)
 
