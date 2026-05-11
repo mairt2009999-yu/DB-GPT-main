@@ -98,6 +98,35 @@ def _run_connector_to_dataframe(datasource: Any, sql: str) -> Any:
     return pd.DataFrame(result[1:], columns=columns)
 
 
+def _get_react_rls_mode(system_app: Any) -> str:
+    try:
+        from dbgpt_app.security.config import RLSConfig
+
+        rls_config = system_app.get_component(RLSConfig.name, RLSConfig)
+        return str(getattr(rls_config, "mode", "off") or "off")
+    except Exception:
+        return "off"
+
+
+def _get_react_database_table_info(
+    database_connector: Any,
+    redact_sample_rows: bool,
+) -> str:
+    if not redact_sample_rows:
+        return database_connector.get_table_info_no_throw()
+
+    sample_rows_attr = "_sample_rows_in_table_info"
+    original_sample_rows = getattr(database_connector, sample_rows_attr, None)
+    if original_sample_rows is None:
+        return database_connector.get_table_info_no_throw()
+
+    try:
+        setattr(database_connector, sample_rows_attr, 0)
+        return database_connector.get_table_info_no_throw()
+    finally:
+        setattr(database_connector, sample_rows_attr, original_sample_rows)
+
+
 async def _execute_react_sql_query_with_rls(
     sql: str,
     datasource: Any,
@@ -1372,13 +1401,19 @@ async def _react_agent_stream(
             local_db_manager = ConnectorManager.get_instance(CFG.SYSTEM_APP)
             database_connector = local_db_manager.get_connector(database_name)
             table_names = list(database_connector.get_table_names())
-            table_info = database_connector.get_table_info_no_throw()
+            rls_mode = _get_react_rls_mode(CFG.SYSTEM_APP)
+            table_info = _get_react_database_table_info(
+                database_connector,
+                redact_sample_rows=rls_mode != "off",
+            )
             database_context = f"""
 ## 数据库信息
 - 数据库名: {database_name}
 - 可用表: {", ".join(table_names)}
 - 表结构:
 {table_info}
+- 表结构信息只用于生成 SQL，不代表查询结果；最终回答必须仅基于 `sql_query`
+  Observation 中返回的数据。
 - 使用 'sql_query' 工具执行 SQL 查询
 - **只允许 SELECT 查询，禁止 INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE**
 """
