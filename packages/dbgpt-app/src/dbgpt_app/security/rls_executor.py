@@ -28,7 +28,7 @@ RLSAwareSQLExecutor 拦截每一条 LLM 生成的 SQL，强制注入当前用户
   Step 2  批量向上游权限服务查询每张表的访问规则
   Step 3  AST 谓词注入（委托 rls_injector.inject）
   Step 4  执行改写后的 SQL
-  Step 5  审计落库（logger.info JSON，不抛异常）
+  Step 5  审计落库（DB + logger.info JSON，不抛异常）
 
 rls_mode 灰度开关
 -----------------
@@ -46,12 +46,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict
 
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from dbgpt_app.security.exceptions import PermissionDeniedError, RLSSQLParseError
+from dbgpt_app.security.rls_audit import RLSAuditDao, RLSAuditRecord
 
 if TYPE_CHECKING:
     from dbgpt_app.security.principal import Principal
@@ -119,6 +121,7 @@ class RLSAwareSQLExecutor:
         conversation_id: str,
         rls_mode: str = "enforce",
         fail_strategy: str = "close",
+        source: str = "unknown",
     ):
         """
         Args:
@@ -135,13 +138,15 @@ class RLSAwareSQLExecutor:
         self._conversation_id = conversation_id
         self._rls_mode = rls_mode
         self._fail_strategy = fail_strategy
+        self._source = source
         logger.info(
             "%s 初始化 SQL 拦截器 | conv=%s mode=%s failStrategy=%s "
-            "datasource=%s dbType=%s userId=%s roles=%s sysCode=%s",
+            "source=%s datasource=%s dbType=%s userId=%s roles=%s sysCode=%s",
             RLS_LOG_PREFIX,
             self._conversation_id,
             self._rls_mode,
             self._fail_strategy,
+            self._source,
             self._get_datasource_name(),
             getattr(self._datasource, "db_type", None),
             getattr(self._principal, "user_id", None),
@@ -181,48 +186,82 @@ class RLSAwareSQLExecutor:
             timeout_seconds,
             sql,
         )
-        if self._rls_mode == "off":
-            return await self._execute_bypass(sql, timeout_seconds)
+        start_time = time.monotonic()
+        rewritten_sql = sql
+        executed_sql = None
+        rls_snapshot: Dict[str, str] = {}
+        data = None
+        try:
+            if self._rls_mode == "off":
+                logger.info(
+                    "%s mode=off 跳过RLS改写直接执行 | conv=%s 数据库执行前SQL=%s",
+                    RLS_LOG_PREFIX,
+                    self._conversation_id,
+                    sql,
+                )
+                executed_sql = sql
+                data = await self._run_sql(executed_sql, timeout_seconds)
+            else:
+                rewritten_sql, rls_snapshot = await self._rewrite(sql)
+                logger.info(
+                    "%s SQL 改写完成 | conv=%s mode=%s 改写后SQL=%s "
+                    "rlsSnapshot=%s",
+                    RLS_LOG_PREFIX,
+                    self._conversation_id,
+                    self._rls_mode,
+                    rewritten_sql,
+                    rls_snapshot,
+                )
 
-        rewritten_sql, rls_snapshot = await self._rewrite(sql)
-        logger.info(
-            "%s SQL 改写完成 | conv=%s mode=%s 改写后SQL=%s rlsSnapshot=%s",
-            RLS_LOG_PREFIX,
-            self._conversation_id,
-            self._rls_mode,
-            rewritten_sql,
-            rls_snapshot,
-        )
+                if self._rls_mode == "shadow":
+                    # shadow 模式：记录改写结果但实际执行原 SQL
+                    logger.info(
+                        "[RLS shadow] conv=%s original=%r rewritten=%r snapshot=%r",
+                        self._conversation_id,
+                        sql,
+                        rewritten_sql,
+                        rls_snapshot,
+                    )
+                    executed_sql = sql
+                    data = await self._run_sql(executed_sql, timeout_seconds)
+                else:
+                    # enforce 模式：执行改写后的 SQL
+                    executed_sql = rewritten_sql
+                    logger.info(
+                        "%s enforce模式准备执行改写后SQL | conv=%s 数据库执行前SQL=%s",
+                        RLS_LOG_PREFIX,
+                        self._conversation_id,
+                        executed_sql,
+                    )
+                    data = await self._run_sql(executed_sql, timeout_seconds)
 
-        if self._rls_mode == "shadow":
-            # shadow 模式：记录改写结果但实际执行原 SQL
-            logger.info(
-                "[RLS shadow] conv=%s original=%r rewritten=%r snapshot=%r",
-                self._conversation_id,
-                sql,
-                rewritten_sql,
-                rls_snapshot,
+            await self._write_audit(
+                original_sql=sql,
+                rewritten_sql=rewritten_sql,
+                executed_sql=executed_sql,
+                rls_snapshot=rls_snapshot,
+                status="success",
+                row_count=self._count_rows(data),
+                duration_ms=self._duration_ms(start_time),
             )
-            data = await self._run_sql(sql, timeout_seconds)
-        else:
-            # enforce 模式：执行改写后的 SQL
-            logger.info(
-                "%s enforce模式准备执行改写后SQL | conv=%s 数据库执行前SQL=%s",
-                RLS_LOG_PREFIX,
-                self._conversation_id,
-                rewritten_sql,
+            return SQLExecutionResult(
+                data=data,
+                rewritten_sql=rewritten_sql,
+                rls_snapshot=rls_snapshot,
+                rls_mode=self._rls_mode,
             )
-            data = await self._run_sql(rewritten_sql, timeout_seconds)
-
-        # 审计落库（异步，失败只记 warning，不影响用户结果）
-        await self._write_audit(rewritten_sql, rls_snapshot)
-
-        return SQLExecutionResult(
-            data=data,
-            rewritten_sql=rewritten_sql,
-            rls_snapshot=rls_snapshot,
-            rls_mode=self._rls_mode,
-        )
+        except Exception as exc:
+            await self._write_audit(
+                original_sql=sql,
+                rewritten_sql=rewritten_sql if rewritten_sql != sql else None,
+                executed_sql=executed_sql,
+                rls_snapshot=rls_snapshot,
+                status="failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                duration_ms=self._duration_ms(start_time),
+            )
+            raise
 
     # ------------------------------------------------------------------
     # 内部各步骤实现
@@ -408,30 +447,89 @@ class RLSAwareSQLExecutor:
             timeout=timeout_seconds,
         )
 
-    async def _write_audit(self, executed_sql: str, rls_snapshot: Dict[str, str]):
-        """Step 5：结构化 JSON 审计日志（仅 logger.info，不写 DB，不抛异常）。"""
+    async def _write_audit(
+        self,
+        *,
+        original_sql: str,
+        rewritten_sql: str | None,
+        executed_sql: str | None,
+        rls_snapshot: Dict[str, str],
+        status: str,
+        error_type: str | None = None,
+        error_message: str | None = None,
+        row_count: int | None = None,
+        duration_ms: int | None = None,
+    ):
+        """Step 5：结构化 JSON 审计日志 + DB 审计落库，不抛异常。"""
         try:
+            record = RLSAuditRecord(
+                conv_id=self._conversation_id,
+                source=self._source,
+                user_id=getattr(self._principal, "user_id", None),
+                tenant_id=getattr(self._principal, "tenant_id", None),
+                sys_code=getattr(self._principal, "sys_code", None),
+                roles=list(getattr(self._principal, "roles", None) or []),
+                datasource=self._get_datasource_name(),
+                db_type=getattr(self._datasource, "db_type", None),
+                rls_mode=self._rls_mode,
+                fail_strategy=self._fail_strategy,
+                original_sql=original_sql,
+                rewritten_sql=rewritten_sql,
+                executed_sql=executed_sql,
+                rls_snapshot=rls_snapshot,
+                status=status,
+                error_type=error_type,
+                error_message=error_message,
+                row_count=row_count,
+                duration_ms=duration_ms,
+                request_id=getattr(self._principal, "request_id", None),
+            )
             logger.info(
                 json.dumps(
                     {
-                        "conv_id": self._conversation_id,
-                        "mode": self._rls_mode,
-                        "user_id": getattr(self._principal, "user_id", None),
-                        "executed_sql": executed_sql,
-                        "snapshot": rls_snapshot,
+                        "conv_id": record.conv_id,
+                        "source": record.source,
+                        "mode": record.rls_mode,
+                        "user_id": record.user_id,
+                        "original_sql": record.original_sql,
+                        "rewritten_sql": record.rewritten_sql,
+                        "executed_sql": record.executed_sql,
+                        "snapshot": record.rls_snapshot,
+                        "status": record.status,
+                        "error_type": record.error_type,
+                        "row_count": record.row_count,
+                        "duration_ms": record.duration_ms,
                     },
                     ensure_ascii=False,
                 )
             )
+            RLSAuditDao().insert(record)
         except Exception as e:
             logger.warning(
-                "RLS 审计日志写入失败 conv=%s err=%s", self._conversation_id, e
+                "RLS 审计落库失败 conv=%s errType=%s err=%s",
+                self._conversation_id,
+                type(e).__name__,
+                e,
             )
+
+    def _count_rows(self, data: Any) -> int | None:
+        index = getattr(data, "index", None)
+        if index is not None:
+            try:
+                return len(index)
+            except Exception:
+                return None
+        if isinstance(data, (list, tuple)):
+            return len(data)
+        return None
+
+    def _duration_ms(self, start_time: float) -> int:
+        return int((time.monotonic() - start_time) * 1000)
 
     async def _execute_bypass(
         self, sql: str, timeout_seconds: float = 30
     ) -> SQLExecutionResult:
-        """rls_mode=off 时的快速路径：直接执行，不改写，不审计。"""
+        """rls_mode=off 时的快速路径：直接执行，不改写。"""
         logger.info(
             "%s mode=off 跳过RLS改写直接执行 | conv=%s 数据库执行前SQL=%s",
             RLS_LOG_PREFIX,

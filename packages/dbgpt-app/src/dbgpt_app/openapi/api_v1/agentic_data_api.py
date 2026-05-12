@@ -180,6 +180,7 @@ async def _execute_react_sql_query_with_rls(
         conversation_id=conversation_id,
         rls_mode=rls_config.mode,
         fail_strategy=rls_config.fail_strategy,
+        source="ReAct.sql_query",
     )
     result = await executor.execute(sql)
     if isinstance(result.data, pd.DataFrame):

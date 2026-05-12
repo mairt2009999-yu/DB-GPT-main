@@ -206,7 +206,7 @@ CREATE TABLE IF NOT EXISTS `prompt_manage`
 
 
 
- CREATE TABLE IF NOT EXISTS `gpts_conversations` (
+CREATE TABLE IF NOT EXISTS `gpts_conversations` (
   `id` int(11) NOT NULL AUTO_INCREMENT COMMENT 'autoincrement id',
   `conv_id` varchar(255) NOT NULL COMMENT 'The unique id of the conversation record',
   `user_goal` text NOT NULL COMMENT 'User''s goals content',
@@ -224,6 +224,39 @@ CREATE TABLE IF NOT EXISTS `prompt_manage`
   UNIQUE KEY `uk_gpts_conversations` (`conv_id`),
   KEY `idx_gpts_name` (`gpts_name`)
 ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COMMENT="gpt conversations";
+
+CREATE TABLE IF NOT EXISTS `rls_sql_audit` (
+  `id` int(11) NOT NULL AUTO_INCREMENT COMMENT 'audit id',
+  `conv_id` varchar(255) NOT NULL COMMENT 'conversation id',
+  `source` varchar(128) NOT NULL COMMENT 'SQL execution source',
+  `user_id` varchar(128) DEFAULT NULL COMMENT 'user id',
+  `tenant_id` varchar(128) DEFAULT NULL COMMENT 'tenant id',
+  `sys_code` varchar(128) DEFAULT NULL COMMENT 'system code',
+  `roles` text DEFAULT NULL COMMENT 'principal roles JSON',
+  `datasource` varchar(255) DEFAULT NULL COMMENT 'datasource name',
+  `db_type` varchar(64) DEFAULT NULL COMMENT 'datasource db type',
+  `rls_mode` varchar(32) NOT NULL COMMENT 'off/shadow/enforce',
+  `fail_strategy` varchar(32) NOT NULL COMMENT 'close/open',
+  `original_sql` text DEFAULT NULL COMMENT 'original SQL',
+  `rewritten_sql` text DEFAULT NULL COMMENT 'RLS rewritten SQL',
+  `executed_sql` text DEFAULT NULL COMMENT 'SQL sent to datasource',
+  `rls_snapshot` text DEFAULT NULL COMMENT 'RLS predicate snapshot JSON',
+  `status` varchar(32) NOT NULL COMMENT 'success/failed',
+  `error_type` varchar(128) DEFAULT NULL COMMENT 'error type',
+  `error_message` text DEFAULT NULL COMMENT 'error message',
+  `row_count` int(11) DEFAULT NULL COMMENT 'returned row count',
+  `duration_ms` int(11) DEFAULT NULL COMMENT 'execution duration ms',
+  `request_id` varchar(128) DEFAULT NULL COMMENT 'request id',
+  `created_at` datetime DEFAULT NULL COMMENT 'created time',
+
+  PRIMARY KEY (`id`),
+  KEY `ix_rls_sql_audit_conv_id` (`conv_id`),
+  KEY `ix_rls_sql_audit_user_id` (`user_id`),
+  KEY `ix_rls_sql_audit_sys_code` (`sys_code`),
+  KEY `ix_rls_sql_audit_status` (`status`),
+  KEY `idx_rls_audit_conv_created` (`conv_id`, `created_at`),
+  KEY `idx_rls_audit_user_created` (`user_id`, `created_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COMMENT="RLS SQL audit";
 
 CREATE TABLE IF NOT EXISTS `gpts_instance` (
   `id` int(11) NOT NULL AUTO_INCREMENT COMMENT 'autoincrement id',
