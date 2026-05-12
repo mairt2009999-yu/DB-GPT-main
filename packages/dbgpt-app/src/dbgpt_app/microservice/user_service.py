@@ -60,6 +60,13 @@ class SqlFragment:
     sql_fragment: str
 
 
+@dataclass(eq=True)
+class AuthorizedTables:
+    user_id: str
+    requested_table_names: List[str] = field(default_factory=list)
+    authorized_table_names: List[str] = field(default_factory=list)
+
+
 class UserServiceClient(BaseComponent):
     name = "dbgpt_user_service_client"
 
@@ -205,6 +212,63 @@ class UserServiceClient(BaseComponent):
             raise ServiceUnavailableError(message) from last_error
         raise ServiceUnavailableError(message)
 
+    async def get_authorized_table_names(
+        self, request_context: RequestContext, table_names: Optional[List[str]] = None
+    ) -> AuthorizedTables:
+        if self.remote_config is None:
+            raise ServiceUnavailableError("User service configuration is missing")
+        if not request_context.user_id:
+            raise AuthenticationFailedError("Missing X-User-Id header")
+        last_error = None
+        last_endpoint = None
+        attempts = self._max_attempts()
+        for _ in range(attempts):
+            instance = await self.discovery.get_service_instance(self.remote_config)
+            if not instance:
+                raise ServiceUnavailableError("No healthy user-service instance found")
+            authorized_tables_path = self._authorized_tables_path()
+            endpoint = self._build_url(instance, authorized_tables_path)
+            last_endpoint = endpoint
+            logger.info(
+                "Calling user-service authorized tables endpoint: service=%s "
+                "baseUrl=%s url=%s userId=%s tableNames=%s",
+                self.remote_config.service_name,
+                instance.base_url,
+                endpoint,
+                request_context.user_id,
+                table_names or [],
+            )
+            try:
+                return await self._fetch_authorized_tables(
+                    instance, request_context, table_names or []
+                )
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+                last_error = exc
+                logger.warning(
+                    "Retryable user-service authorized tables call failed: %s",
+                    self._format_remote_error(exc, endpoint),
+                )
+                await self.discovery.invalidate(self.remote_config.service_name)
+                continue
+            except InvalidUserServiceResponseError:
+                raise
+            except ServiceUnavailableError as exc:
+                last_error = exc
+                logger.warning(
+                    "Retryable user-service authorized tables call failed: %s",
+                    self._format_remote_error(exc, endpoint),
+                )
+                await self.discovery.invalidate(self.remote_config.service_name)
+                continue
+            except AuthenticationFailedError:
+                raise
+            except AuthorizationFailedError:
+                raise
+        message = self._format_remote_error(last_error, last_endpoint)
+        if last_error:
+            raise ServiceUnavailableError(message) from last_error
+        raise ServiceUnavailableError(message)
+
     def _roles_path(self, request_context: RequestContext) -> str:
         return self.remote_config.roles_path.format(
             user_id=quote(str(request_context.user_id), safe="")
@@ -214,6 +278,9 @@ class UserServiceClient(BaseComponent):
         return self.remote_config.sql_fragment_path.format(
             user_id=quote(str(request_context.user_id), safe="")
         )
+
+    def _authorized_tables_path(self) -> str:
+        return self.remote_config.authorized_tables_path
 
     def _max_attempts(self) -> int:
         return max(1, self.remote_config.retries + 1)
@@ -298,6 +365,45 @@ class UserServiceClient(BaseComponent):
                 "Invalid JSON in user-service response"
             ) from exc
         return self._to_sql_fragment(payload, request_context, table_code)
+
+    async def _fetch_authorized_tables(
+        self,
+        instance: ServiceInstance,
+        request_context: RequestContext,
+        table_names: List[str],
+    ) -> AuthorizedTables:
+        timeout = httpx.Timeout(
+            timeout=self.remote_config.timeout_ms / 1000,
+            connect=self.remote_config.connect_timeout_ms / 1000,
+            read=self.remote_config.read_timeout_ms / 1000,
+        )
+        authorized_tables_path = self._authorized_tables_path()
+        payload = {
+            "userId": int(request_context.user_id),
+            "tableNames": list(table_names),
+        }
+        async with self._client_factory(timeout) as client:
+            response = await client.post(
+                self._build_url(instance, authorized_tables_path),
+                headers=self._build_headers(request_context),
+                json=payload,
+            )
+        if response.status_code in (401, 404):
+            raise AuthenticationFailedError("user-service rejected the principal")
+        if response.status_code == 403:
+            raise AuthorizationFailedError("user-service rejected the principal")
+        if response.status_code >= 500:
+            raise ServiceUnavailableError(
+                f"user-service failed with {response.status_code}"
+            )
+        response.raise_for_status()
+        try:
+            response_payload = response.json()
+        except ValueError as exc:
+            raise InvalidUserServiceResponseError(
+                "Invalid JSON in user-service response"
+            ) from exc
+        return self._to_authorized_tables(response_payload, request_context)
 
     def _build_url(self, instance: ServiceInstance, path: str) -> str:
         prefix = self.remote_config.path_prefix.rstrip("/")
@@ -418,4 +524,51 @@ class UserServiceClient(BaseComponent):
                 data.get("tableCode") or data.get("table_code") or table_code
             ),
             sql_fragment=str(sql_fragment),
+        )
+
+    def _to_authorized_tables(
+        self, payload: dict, request_context: RequestContext
+    ) -> AuthorizedTables:
+        if not isinstance(payload, dict):
+            raise InvalidUserServiceResponseError("Invalid user-service response")
+        code = payload.get("code")
+        if code is not None and int(code) != 200:
+            if int(code) in (401, 404):
+                raise AuthenticationFailedError("user-service rejected the principal")
+            if int(code) == 403:
+                raise AuthorizationFailedError("user-service rejected the principal")
+            if int(code) >= 500:
+                raise ServiceUnavailableError(f"user-service failed with {code}")
+            raise InvalidUserServiceResponseError(
+                f"user-service returned unexpected code {code}"
+            )
+        data = payload.get("data") if "data" in payload else payload
+        if not isinstance(data, dict):
+            raise InvalidUserServiceResponseError(
+                "Missing data in user-service response"
+            )
+        authorized_table_names = data.get("authorizedTableNames")
+        if authorized_table_names is None:
+            authorized_table_names = data.get("authorized_table_names")
+        if authorized_table_names is None:
+            raise InvalidUserServiceResponseError(
+                "Missing authorizedTableNames in user-service response"
+            )
+        if not isinstance(authorized_table_names, list):
+            raise InvalidUserServiceResponseError(
+                "Invalid authorizedTableNames in user-service response"
+            )
+        requested_table_names = data.get("requestedTableNames")
+        if requested_table_names is None:
+            requested_table_names = data.get("requested_table_names") or []
+        if not isinstance(requested_table_names, list):
+            raise InvalidUserServiceResponseError(
+                "Invalid requestedTableNames in user-service response"
+            )
+        return AuthorizedTables(
+            user_id=str(
+                data.get("userId") or data.get("user_id") or request_context.user_id
+            ),
+            requested_table_names=[str(name) for name in requested_table_names],
+            authorized_table_names=[str(name) for name in authorized_table_names],
         )

@@ -481,6 +481,10 @@ class RemoteServiceConfig(BaseParameters):
         default="/{user_id}/sql-fragment",
         metadata={"help": _("Path used to fetch SQL fragment by user id")},
     )
+    authorized_tables_path: str = field(
+        default="/authorized-tables",
+        metadata={"help": _("Path used to fetch authorized table names")},
+    )
 
 
 @dataclass

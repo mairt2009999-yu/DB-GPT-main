@@ -22,6 +22,7 @@ from dbgpt.component import ComponentType
 from dbgpt.configs.model_config import SKILLS_DIR, resolve_root_path
 from dbgpt.core import PromptTemplate
 from dbgpt.model.cluster import WorkerManagerFactory
+from dbgpt_app.microservice.user_service import UserServiceClient
 from dbgpt_app.openapi.api_view_model import (
     ConversationVo,
     Result,
@@ -40,6 +41,7 @@ REACT_AGENT_MEMORY_CACHE: Dict[str, "GptsMemory"] = {}
 
 DEFAULT_SKILLS_DIR = SKILLS_DIR
 REACT_KNOWLEDGE_LOG_PREFIX = ">>>>>>>> [ReAct知识库]"
+REACT_TABLE_AUTH_LOG_PREFIX = ">>>>>>>> [ReAct表权限]"
 REACT_KNOWLEDGE_CONTENT_PREVIEW_LIMIT = 500
 AUTO_DATA_MARKER_PATTERN = re.compile(
     r"###([A-Z0-9_]+)_START###\s*(.*?)\s*###\1_END###", re.DOTALL
@@ -49,6 +51,12 @@ RLS_LOG_PREFIX = ">>>>>>>>>>> [SQL拦截/RLS]"
 
 def _emit_react_knowledge_log(message: str, level: int = logging.INFO) -> None:
     log_line = f"{REACT_KNOWLEDGE_LOG_PREFIX} {message}"
+    print(log_line)
+    logger.log(level, log_line)
+
+
+def _emit_react_table_auth_log(message: str, level: int = logging.INFO) -> None:
+    log_line = f"{REACT_TABLE_AUTH_LOG_PREFIX} {message}"
     print(log_line)
     logger.log(level, log_line)
 
@@ -111,20 +119,145 @@ def _get_react_rls_mode(system_app: Any) -> str:
 def _get_react_database_table_info(
     database_connector: Any,
     redact_sample_rows: bool,
+    table_names: Optional[List[str]] = None,
 ) -> str:
     if not redact_sample_rows:
-        return database_connector.get_table_info_no_throw()
+        return database_connector.get_table_info_no_throw(table_names)
 
     sample_rows_attr = "_sample_rows_in_table_info"
     original_sample_rows = getattr(database_connector, sample_rows_attr, None)
     if original_sample_rows is None:
-        return database_connector.get_table_info_no_throw()
+        return database_connector.get_table_info_no_throw(table_names)
 
     try:
         setattr(database_connector, sample_rows_attr, 0)
-        return database_connector.get_table_info_no_throw()
+        return database_connector.get_table_info_no_throw(table_names)
     finally:
         setattr(database_connector, sample_rows_attr, original_sample_rows)
+
+
+async def _filter_react_prompt_table_names(
+    *,
+    database_name: str,
+    all_table_names: List[str],
+    system_app: Any,
+    principal: Any,
+) -> Optional[List[str]]:
+    """Return table names allowed in ReAct database prompt.
+
+    Returns None when user-service is unavailable so callers can preserve the old
+    unfiltered table-info call.
+    """
+    user_id = getattr(principal, "user_id", None)
+    _emit_react_table_auth_log(
+        "表权限鉴权开始"
+        f" | database={database_name}"
+        f" | userId={user_id}"
+        f" | tenantId={getattr(principal, 'tenant_id', None)}"
+        f" | roles={getattr(principal, 'roles', None)}"
+        f" | sysCode={getattr(principal, 'sys_code', None)}"
+        f" | requestId={getattr(principal, 'request_id', None)}"
+        f" | allTables={all_table_names}"
+        " | requestTableNames=[]"
+    )
+    try:
+        user_service_client = UserServiceClient.get_instance(system_app)
+        authorized_tables = await user_service_client.get_authorized_table_names(
+            principal,
+            table_names=[],
+        )
+    except Exception as exc:
+        _emit_react_table_auth_log(
+            "表权限鉴权失败，按失败放行使用全部表"
+            f" | database={database_name}"
+            f" | userId={user_id}"
+            f" | errType={type(exc).__name__}"
+            f" | err={exc}"
+            f" | promptTables={all_table_names}",
+            logging.WARNING,
+        )
+        return None
+
+    authorized_name_set = set(authorized_tables.authorized_table_names)
+    prompt_table_names = [
+        table_name
+        for table_name in all_table_names
+        if table_name in authorized_name_set
+    ]
+    _emit_react_table_auth_log(
+        "表权限鉴权返回"
+        f" | database={database_name}"
+        f" | responseUserId={authorized_tables.user_id}"
+        f" | requestedTableNames={authorized_tables.requested_table_names}"
+        f" | authorizedTableNames={authorized_tables.authorized_table_names}"
+        f" | promptTables={prompt_table_names}"
+    )
+    if not prompt_table_names:
+        _emit_react_table_auth_log(
+            "表权限鉴权成功但无授权表，Prompt不放入任何表结构"
+            f" | database={database_name}"
+            f" | userId={user_id}"
+        )
+    return prompt_table_names
+
+
+async def _build_react_database_context(
+    *,
+    database_name: str,
+    database_connector: Any,
+    system_app: Any,
+    principal: Any,
+) -> str:
+    all_table_names = list(database_connector.get_table_names())
+    rls_mode = _get_react_rls_mode(system_app)
+    filtered_table_names = await _filter_react_prompt_table_names(
+        database_name=database_name,
+        all_table_names=all_table_names,
+        system_app=system_app,
+        principal=principal,
+    )
+    prompt_table_names = (
+        all_table_names if filtered_table_names is None else filtered_table_names
+    )
+    if prompt_table_names:
+        table_info = _get_react_database_table_info(
+            database_connector,
+            redact_sample_rows=rls_mode != "off",
+            table_names=None if filtered_table_names is None else prompt_table_names,
+        )
+        no_table_message = ""
+    else:
+        table_info = _get_react_database_table_info(
+            database_connector,
+            redact_sample_rows=rls_mode != "off",
+            table_names=[],
+        )
+        no_table_message = "\n- 当前用户没有可用数据库表。"
+
+    _emit_react_table_auth_log(
+        "添加到Prompt的表权限结果"
+        f" | database={database_name}"
+        f" | rlsMode={rls_mode}"
+        f" | redactSampleRows={rls_mode != 'off'}"
+        f" | promptTables={prompt_table_names}"
+    )
+    logger.info(
+        "Loaded database connector: %s (tables: %s, promptTables: %s)",
+        database_name,
+        ", ".join(all_table_names),
+        ", ".join(prompt_table_names),
+    )
+    return f"""
+## 数据库信息
+- 数据库名: {database_name}
+- 可用表: {", ".join(prompt_table_names)}{no_table_message}
+- 表结构:
+{table_info}
+- 表结构信息只用于生成 SQL，不代表查询结果；最终回答必须仅基于 `sql_query`
+  Observation 中返回的数据。
+- 使用 'sql_query' 工具执行 SQL 查询
+- **只允许 SELECT 查询，禁止 INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE**
+"""
 
 
 async def _execute_react_sql_query_with_rls(
@@ -1399,28 +1532,15 @@ async def _react_agent_stream(
     database_context = ""
     if database_name:
         try:
+            from dbgpt_app.security.principal import current_principal
+
             local_db_manager = ConnectorManager.get_instance(CFG.SYSTEM_APP)
             database_connector = local_db_manager.get_connector(database_name)
-            table_names = list(database_connector.get_table_names())
-            rls_mode = _get_react_rls_mode(CFG.SYSTEM_APP)
-            table_info = _get_react_database_table_info(
-                database_connector,
-                redact_sample_rows=rls_mode != "off",
-            )
-            database_context = f"""
-## 数据库信息
-- 数据库名: {database_name}
-- 可用表: {", ".join(table_names)}
-- 表结构:
-{table_info}
-- 表结构信息只用于生成 SQL，不代表查询结果；最终回答必须仅基于 `sql_query`
-  Observation 中返回的数据。
-- 使用 'sql_query' 工具执行 SQL 查询
-- **只允许 SELECT 查询，禁止 INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE**
-"""
-            logger.info(
-                f"Loaded database connector: {database_name} "
-                f"(tables: {', '.join(table_names)})"
+            database_context = await _build_react_database_context(
+                database_name=database_name,
+                database_connector=database_connector,
+                system_app=CFG.SYSTEM_APP,
+                principal=current_principal(),
             )
         except Exception as e:
             logger.warning(f"Failed to load database connector: {e}", exc_info=e)
